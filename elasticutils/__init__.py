@@ -52,7 +52,7 @@ def get_es(hosts=None, default_indexes=None, timeout=None, dump_curl=None,
     """
     # Cheap way of de-None-ifying things
     hosts = hosts or DEFAULT_HOSTS
-    default_indexes = default_indexes or DEFAULT_INDEX
+    default_indexes = default_indexes or DEFAULT_INDEXES
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     dump_curl = dump_curl or DEFAULT_DUMP_CURL
 
@@ -634,7 +634,7 @@ class S(object):
 
         return default_builder()
 
-    def get_indexes(self, default_indexes=DEFAULT_INDEX):
+    def get_indexes(self, default_indexes=DEFAULT_INDEXES):
         for action, value in reversed(self.steps):
             if action == 'indexes':
                 return value
@@ -904,18 +904,18 @@ class MappingType(object):
         return self.get_model().get(id=self._id)
 
     @classmethod
-    def get_index(cls):
-        """Returns the index to use for this mapping type.
+    def get_indexes(cls):
+        """Returns the indexes to use for this mapping type.
 
-        You can specify the index to use for this mapping type.  This
-        affects ``S`` built with this type.
+        You can specify the indexes to use for this mapping type.
+        This affects ``S`` built with this type.
 
-        By default, this is "default".
+        By default, this is ["default"].
 
         Override this if you want something different.
 
         """
-        return DEFAULT_INDEX
+        return DEFAULT_INDEXES
 
     @classmethod
     def get_mapping_type_name(cls):
