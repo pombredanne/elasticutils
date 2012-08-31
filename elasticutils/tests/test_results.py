@@ -77,7 +77,9 @@ class TestResultsWithData(ElasticTestCase):
         """Specifying no fields with values_list defaults to ['id']."""
         searcher = list(self.get_s().query(foo='bar').values_list())
         assert isinstance(searcher[0], tuple)
-        eq_(searcher[0], (1,))
+        # We sort the result and expected result here so that the
+        # order is stable and comparable.
+        eq_(sorted(searcher[0]), sorted((u'2', u'bar', u'awesome', 1)))
 
     def test_values_list_results(self):
         """With values_list fields, returns list of tuples."""
@@ -127,7 +129,7 @@ class TestResultsWithData(ElasticTestCase):
         eq_(S().query(fld1=2)
                .values_list()
                ._build_query(),
-            {'query': {"term": {"fld1": 2}}, 'fields': ['id']})
+            {'query': {"term": {"fld1": 2}}})
 
 
 class TestMappingType(ElasticTestCase):

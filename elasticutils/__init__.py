@@ -312,8 +312,6 @@ class S(object):
             By default this is at least ``['id']``.
 
         """
-        if not fields:
-            fields = ['id']
         return self._clone(next_step=('values_list', fields))
 
     def values_dict(self, *fields):
@@ -447,7 +445,8 @@ class S(object):
         filters = []
         queries = []
         sort = []
-        fields = set()
+        dict_fields = set()
+        list_fields = set()
         facets = {}
         facets_raw = {}
         demote = None
@@ -464,13 +463,16 @@ class S(object):
                     else:
                         sort.append(key)
             elif action == 'values_list':
-                fields |= set(value)
+                if not value:
+                    list_fields = set()
+                else:
+                    list_fields |= set(value)
                 as_list, as_dict = True, False
             elif action == 'values_dict':
                 if not value:
-                    fields = set()
+                    dict_fields = set()
                 else:
-                    fields |= set(value)
+                    dict_fields |= set(value)
                 as_list, as_dict = False, True
             elif action == 'explain':
                 explain = value
@@ -519,8 +521,12 @@ class S(object):
                     }
                 }
 
-        if fields:
-            qs['fields'] = list(fields)
+        if as_list and list_fields:
+            fields = qs['fields'] = list(list_fields)
+        elif as_dict and dict_fields:
+            fields = qs['fields'] = list(dict_fields)
+        else:
+            fields = set()
 
         if facets:
             qs['facets'] = facets

@@ -891,18 +891,24 @@ will be `DefaultMappingType`.
 Results as a list of tuples
 ---------------------------
 
-`values_list` with no arguments returns a list of tuples each with an
-id. With arguments, it'll return a list of tuples of values of the
-fields specified in the order the fields were specified.
+`values_list` with no arguments returns a list of tuples of all the
+data for that document. With arguments, it'll return a list of tuples
+of values of the fields specified in the order the fields were
+specified.
 
 For example:
 
 >>> list(S().values_list())
-[(1,), (2,), (3,)]
+[(1, 'fred', 40), (2, 'brian', 30), (3, 'james', 45)]
 >>> list(S().values_list('id', 'name'))
 [(1, 'fred'), (2, 'brian'), (3, 'james')]
 >>> list(S().values_list('name', 'id')
 [('fred', 1), ('brian', 2), ('james', 3)]
+
+.. Note::
+
+   If you don't specify fields, the data comes back in an arbitrary
+   order. It's probably best to specify fields or use ``values_dict``.
 
 
 Results as a list of dicts
