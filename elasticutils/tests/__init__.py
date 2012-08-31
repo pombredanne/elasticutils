@@ -73,13 +73,13 @@ class ElasticTestCase(TestCase):
         es.create_index(cls.index_name)
 
     @classmethod
-    def index_data(cls, data, index=None, doctype=None, createindex=False):
+    def index_data(cls, data, index=None, doctype=None, create_index=False):
         index = index or cls.index_name
         doctype = doctype or cls.mapping_type_name
 
         es = cls.get_es()
 
-        if createindex:
+        if create_index:
             cls.create_index()
 
         for item in data:

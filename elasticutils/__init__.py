@@ -52,7 +52,7 @@ def get_es(hosts=None, default_indexes=None, timeout=None, dump_curl=None,
     """
     # Cheap way of de-None-ifying things
     hosts = hosts or DEFAULT_HOSTS
-    default_indexes = default_indexes or DEFAULT_INDEXES
+    default_indexes = default_indexes or DEFAULT_INDEX
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     dump_curl = dump_curl or DEFAULT_DUMP_CURL
 
@@ -628,7 +628,7 @@ class S(object):
 
         return default_builder()
 
-    def get_indexes(self, default_indexes=DEFAULT_INDEXES):
+    def get_indexes(self, default_indexes=DEFAULT_INDEX):
         for action, value in reversed(self.steps):
             if action == 'indexes':
                 return value
@@ -874,7 +874,7 @@ class MappingType(object):
     def get_object(self):
         """Returns the model instance
 
-        This gets called when someon euses the ``.object`` attribute
+        This gets called when someone uses the ``.object`` attribute
         which triggers lazy-loading of the object.
 
         If this MappingType is associated with a model, then by
@@ -885,6 +885,14 @@ class MappingType(object):
         where ``self._id`` is the ElasticSearch document id.
 
         Override it to do something different.
+
+        :raises cls.DoesNotExist: if the instance doesn't exist.
+            You should wrap this in a try/except block like this::
+
+                try:
+                    obj = result.object
+                except result.get_model().DoesNotExist:
+                    # exception handling here....
 
         """
         return self.get_model().get(id=self._id)
@@ -901,7 +909,7 @@ class MappingType(object):
         Override this if you want something different.
 
         """
-        return DEFAULT_INDEXES
+        return DEFAULT_INDEX
 
     @classmethod
     def get_mapping_type_name(cls):
@@ -959,13 +967,16 @@ class MappingType(object):
 
     def __len__(self):
         return self._results_dict.__len__()
+
     def __getitem__(self, key):
-        print self._results_dict
         return self._results_dict.__getitem__(key)
+
     def __iter__(self):
         return self._results_dict.__iter__()
+
     def __reversed__(self):
         return self._results_dict.__reversed__()
+
     def __contains__(self, item):
         return self._results_dict.__contains__(item)
 

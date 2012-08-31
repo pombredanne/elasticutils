@@ -5,7 +5,7 @@ from elasticutils.contrib.django import get_es, S
 
 
 class DjangoMappingType(MappingType):
-    """This has most of the pieces you need to tie back toa Django ORM model.
+    """This has most of the pieces you need to tie back to a Django ORM model.
 
     Subclass this and override at least `get_model`.
 

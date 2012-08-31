@@ -140,7 +140,7 @@ class TestMappingType(ElasticTestCase):
             {'id': 1, 'name': 'Alice'}
             ]
 
-        self.__class__.index_data(data, createindex=True)
+        self.__class__.index_data(data, create_index=True)
         s = self.get_s(DefaultMappingType)
         result = list(s)[0]
 
@@ -153,7 +153,7 @@ class TestMappingType(ElasticTestCase):
             {'id': 1, '_object': 'foo'}
             ]
 
-        self.__class__.index_data(data, createindex=True)
+        self.__class__.index_data(data, create_index=True)
         s = self.get_s(DefaultMappingType)
         result = list(s)[0]
 

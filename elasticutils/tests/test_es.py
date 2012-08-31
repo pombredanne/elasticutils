@@ -2,7 +2,7 @@ from unittest import TestCase
 
 from nose.tools import eq_
 
-from elasticutils import get_es, DEFAULT_TIMEOUT, DEFAULT_INDEXES
+from elasticutils import get_es, DEFAULT_TIMEOUT, DEFAULT_INDEX
 
 
 class ESTest(TestCase):
