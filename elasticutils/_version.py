@@ -3,5 +3,5 @@
 # * 0.3     - released version
 # * 0.3a1   - alpha version
 # * 0.3.dev - version in developmentv
-__version__ = '0.6.dev'
+__version__ = '0.7.dev'
 __releasedate__ = ''

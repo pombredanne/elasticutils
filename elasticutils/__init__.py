@@ -1,9 +1,9 @@
+import copy
 import logging
-from itertools import izip
 from operator import itemgetter
 
-from pyes import ES
-from pyes import VERSION as PYES_VERSION
+from pyelasticsearch import ElasticSearch
+from pyelasticsearch import __version__ as PYELASTICSEARCH_VERSION
 
 from elasticutils._version import __version__
 
@@ -11,105 +11,132 @@ from elasticutils._version import __version__
 log = logging.getLogger('elasticutils')
 
 
-DEFAULT_HOSTS = ['localhost:9200']
+DEFAULT_URLS = ['http://localhost:9200']
+DEFAULT_DOCTYPES = None
+DEFAULT_INDEXES = None
 DEFAULT_TIMEOUT = 5
-DEFAULT_DOCTYPES = ['document']
-DEFAULT_INDEXES = ['default']
-DEFAULT_DUMP_CURL = None
 
 
-def _split(s):
-    if '__' in s:
-        return s.rsplit('__', 1)
-    return s, None
+class ElasticUtilsError(Exception):
+    """Base class for ElasticUtils errors."""
+    pass
 
 
-def get_es(hosts=None, default_indexes=None, timeout=None, dump_curl=None,
-           **settings):
-    """Create an ES object and return it.
-
-    :arg hosts: list of uris; ES hosts to connect to, defaults to
-        ``['localhost:9200']``
-    :arg default_indexes: list of strings; the default indexes to use,
-        defaults to 'default'
-    :arg timeout: int; the timeout in seconds, defaults to 5
-    :arg dump_curl: function or None; function that dumps curl output,
-        see docs, defaults to None
-    :arg settings: other settings to pass into `pyes.es.ES`
-
-    Examples:
-
-    >>> es = get_es()
-
-
-    >>> es = get_es(hosts=['localhost:9200'])
-
-
-    >>> es = get_es(timeout=30)  # good for indexing
-
-
-    >>> es = get_es(default_indexes=['sumo_prod_20120627']
-
-
-    >>> class CurlDumper(object):
-    ...     def write(self, text):
-    ...         print text
-    ...
-    >>> es = get_es(dump_curl=CurlDumper())
-
-    """
-    # Cheap way of de-None-ifying things
-    hosts = hosts or DEFAULT_HOSTS
-    default_indexes = default_indexes or DEFAULT_INDEXES
-    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    dump_curl = dump_curl or DEFAULT_DUMP_CURL
-
-    if not isinstance(default_indexes, list):
-        default_indexes = [default_indexes]
-
-    es = ES(hosts,
-            default_indexes=default_indexes,
-            timeout=timeout,
-            dump_curl=dump_curl,
-            **settings)
-
-    # pyes 0.15 does this lame thing where it ignores dump_curl in
-    # the ES constructor and always sets it to None. So what we do
-    # is set it manually after the ES has been created and
-    # defaults['dump_curl'] is truthy. This might not work for all
-    # values of dump_curl.
-    if PYES_VERSION[0:2] == (0, 15) and dump_curl is not None:
-        es.dump_curl = dump_curl
-
-    return es
-
-
-class InvalidFieldActionError(Exception):
+class InvalidFieldActionError(ElasticUtilsError):
     """Raise this when the field action doesn't exist"""
     pass
 
 
-def _process_filters(filters):
-    rv = []
-    for f in filters:
-        if isinstance(f, F):
-            if f.filters:
-                rv.append(f.filters)
-        else:
-            key, val = f
-            key, field_action = _split(key)
-            if key == 'or_':
-                rv.append({'or':_process_filters(val.items())})
-            elif field_action is None:
-                rv.append({'term': {key: val}})
-            elif field_action == 'in':
-                rv.append({'in': {key: val}})
-            elif field_action in ('gt', 'gte', 'lt', 'lte'):
-                rv.append({'range': {key: {field_action: val}}})
-            else:
-                raise InvalidFieldActionError(
-                    '%s is not a valid field action' % field_action)
-    return rv
+class InvalidFacetType(ElasticUtilsError):
+    """Raise when _type is unrecognized."""
+    pass
+
+
+class BadSearch(ElasticUtilsError):
+    """Raise when there is something wrong with the search."""
+    pass
+
+
+def _build_key(urls, timeout, **settings):
+    # Order the settings by key and then turn it into a string with
+    # repr. There are a lot of edge cases here, but the worst that
+    # happens is that the key is different and so you get a new
+    # ElasticSearch. We'll probably have to tweak this.
+    settings = sorted(settings.items(), key=lambda item: item[0])
+    settings = repr([(k, v) for k, v in settings])
+
+    # pyelasticsearch allows urls to be a string, so we make sure to
+    # account for that when converting whatever it is into a tuple.
+    if isinstance(urls, basestring):
+        urls = (urls,)
+    else:
+        urls = tuple(urls)
+
+    # Generate a tuple of all the bits and return that as the key
+    # because that's hashable.
+    key = (urls, timeout, settings)
+    return key
+
+
+_cached_elasticsearch = {}
+
+
+def get_es(urls=None, timeout=DEFAULT_TIMEOUT, force_new=False, **settings):
+    """Create a pyelasticsearch `ElasticSearch` object and return it.
+
+    This will aggressively re-use `ElasticSearch` objects with the
+    following rules:
+
+    1. if you pass the same argument values to `get_es()`, then it
+       will return the same `ElasticSearch` object
+    2. if you pass different argument values to `get_es()`, then it
+       will return different `ElasticSearch` object
+    3. it caches each `ElasticSearch` object that gets created
+    4. if you pass in `force_new=True`, then you are guaranteed to get
+       a fresh `ElasticSearch` object AND that object will not be
+       cached
+
+    :arg urls: list of uris; ElasticSearch hosts to connect to,
+        defaults to ``['http://localhost:9200']``
+    :arg timeout: int; the timeout in seconds, defaults to 5
+    :arg force_new: Forces get_es() to generate a new ElasticSearch
+        object rather than pulling it from cache.
+    :arg settings: other settings to pass into ElasticSearch
+        constructor See
+        `<http://pyelasticsearch.readthedocs.org/en/latest/api/>`_ for
+        more details.
+
+    Examples::
+
+        # Returns cached ElasticSearch object
+        es = get_es()
+
+        # Returns a new ElasticSearch object
+        es = get_es(force_new=True)
+
+        es = get_es(urls=['http://localhost:9200'])
+
+        es = get_es(urls=['http://localhost:9200'], timeout=10,
+                    max_retries=3)
+
+    """
+    # Cheap way of de-None-ifying things
+    urls = urls or DEFAULT_URLS
+
+    # v0.7: Check for 'hosts' instead of 'urls'. Take this out in v1.0.
+    if 'hosts' in settings:
+        raise DeprecationWarning('"hosts" is deprecated in favor of "urls".')
+
+    if not force_new:
+        key = _build_key(urls, timeout, **settings)
+        if key in _cached_elasticsearch:
+            return _cached_elasticsearch[key]
+
+    es = ElasticSearch(urls, timeout=timeout, **settings)
+
+    if not force_new:
+        # We don't need to rebuild the key here since we built it in
+        # the previous if block, so it's in the namespace. Having said
+        # that, this is a little ew.
+        _cached_elasticsearch[key] = es
+
+    return es
+
+
+def split_field_action(s):
+    """Takes a string and splits it into field and action
+
+    Example::
+
+    >>> split_field_action('foo__bar')
+    'foo', 'bar'
+    >>> split_field_action('foo')
+    'foo', None
+
+    """
+    if '__' in s:
+        return s.rsplit('__', 1)
+    return s, None
 
 
 def _process_facets(facets, flags):
@@ -130,6 +157,21 @@ def _process_facets(facets, flags):
 class F(object):
     """
     Filter objects.
+
+    Makes it easier to create filters cumulatively using ``&`` (and),
+    ``|`` (or) and ``~`` (not) operations.
+
+    For example::
+
+        f = F()
+        f &= F(price='Free')
+        f |= F(style='Mexican')
+
+    creates a filter "price = 'Free' or style = 'Mexican'".
+
+    :property filters: a list of the filters in this F; filters are
+        either a dict or (key, val) tuple
+
     """
     def __init__(self, **filters):
         """Creates an F
@@ -138,14 +180,14 @@ class F(object):
             valid
 
         """
-        if filters:
-            items = _process_filters(filters.items())
-            if len(items) > 1:
-                self.filters = {'and': items}
-            else:
-                self.filters = items[0]
+        filters = filters.items()
+        if len(filters) > 1:
+            self.filters = [{'and': filters}]
         else:
-            self.filters = {}
+            self.filters = filters
+
+    def __repr__(self):
+        return '<F {0}>'.format(self.filters)
 
     def _combine(self, other, conn='and'):
         """
@@ -153,18 +195,23 @@ class F(object):
         objects combined with the connector `conn`.
         """
         f = F()
+
+        self_filters = copy.deepcopy(self.filters)
+        other_filters = copy.deepcopy(other.filters)
+
         if not self.filters:
-            f.filters = other.filters
+            f.filters = other_filters
         elif not other.filters:
-            f.filters = self.filters
-        elif conn in self.filters:
-            f.filters = self.filters
-            f.filters[conn].append(other.filters)
-        elif conn in other.filters:
-            f.filters = other.filters
-            f.filters[conn].append(self.filters)
+            f.filters = self_filters
+        elif conn in self.filters[0]:
+            f.filters = self_filters
+            f.filters[0][conn].extend(other_filters)
+        elif conn in other.filters[0]:
+            f.filters = other_filters
+            f.filters[0][conn].extend(self_filters)
         else:
-            f.filters = {conn: [self.filters, other.filters]}
+            f.filters = [{conn: self_filters + other_filters}]
+
         return f
 
     def __or__(self, other):
@@ -175,16 +222,16 @@ class F(object):
 
     def __invert__(self):
         f = F()
-        if (len(self.filters) < 2 and
-           'not' in self.filters and 'filter' in self.filters['not']):
-            f.filters = self.filters['not']['filter']
+        self_filters = copy.deepcopy(self.filters)
+        if len(self_filters) == 0:
+            f.filters = []
+        elif (len(self_filters) < 2
+            and 'not' in self_filters
+            and 'filter' in self_filters['not']):
+            f.filters = self_filters['not']['filter']
         else:
-            f.filters = {'not': {'filter': self.filters}}
+            f.filters = [{'not': {'filter': self_filters}}]
         return f
-
-
-# Number of results to show before truncating when repr(S)
-REPR_OUTPUT_SIZE = 20
 
 
 def _boosted_value(name, action, key, value, boost):
@@ -193,10 +240,8 @@ def _boosted_value(name, action, key, value, boost):
         # Note: Most queries use 'value' for the key name except Text
         # queries which use 'query'. So we have to do some switcheroo
         # for that.
-        return {
-            name: {
-                'boost': boost,
-                'query' if action == 'text' else 'value': value}}
+        value_key = 'query' if action in ['text', 'text_phrase'] else 'value'
+        return {name: {'boost': boost, value_key: value}}
     return {name: value}
 
 
@@ -225,6 +270,24 @@ class S(object):
     over it, calling ``.count``, doing ``len(s)``, or calling
     ``.facet_count``.
 
+    **Adding filter support**
+
+    You can add support for filters that S doesn't have support for by
+    subclassing S with a method called ``process_filter_ACTION``.
+    This method takes a key, value and an action.
+
+    For example::
+
+        claass FunkyS(S):
+            def process_filter_funkyfilter(self, key, val, action):
+                return {'funkyfilter': {'field': key, 'value': val}}
+
+
+    Then you can use that just like other actions::
+
+        s = FunkyS().filter(F(foo__funkyfilter='bar'))
+        s = FunkyS().filter(foo__funkyfilter='bar')
+
     """
     def __init__(self, type_=None):
         """Create and return an S.
@@ -241,10 +304,13 @@ class S(object):
         self._results_cache = None
 
     def __repr__(self):
-        data = list(self)[:REPR_OUTPUT_SIZE + 1]
-        if len(data) > REPR_OUTPUT_SIZE:
-            data[-1] = "...(remaining elements truncated)..."
-        return repr(data)
+        try:
+            return '<S {0}>'.format(repr(self._build_query()))
+        except RuntimeError:
+            # This happens when you're debugging _build_query and try
+            # to repr the instance you're calling it on. Then that
+            # calls _build_query and ...
+            return repr(self.steps)
 
     def _clone(self, next_step=None):
         new = self.__class__(self.type)
@@ -257,46 +323,17 @@ class S(object):
         return new
 
     def es(self, **settings):
-        """Return a new S with specified ES settings.
+        """Return a new S with specified ElasticSearch settings.
 
-        This allows you to configure the ES that gets used to execute
-        the search.
+        This allows you to configure the ElasticSearch that gets used
+        to execute the search.
 
-        :arg settings: the settings you'd use to build the ES---same
-            as what you'd pass to :py:func:`get_es`.
+        :arg settings: the settings you'd use to build the
+            ElasticSearch---same as what you'd pass to
+            :py:func:`get_es`.
 
         """
         return self._clone(next_step=('es', settings))
-
-    def es_builder(self, builder_function):
-        """Return a new S with specified ES builder.
-
-        When you do something with an S that causes it to execute a
-        search, then it will call the specified builder function with
-        the S instance. The builder function will return an ES object
-        that the S will use to execute the search with.
-
-        :arg builder_function: function; takes an S instance and returns
-            an ES
-
-        This is handy for caching ES instances. For example, you could
-        create a builder that caches ES instances thread-local::
-
-            from threading import local
-            _local = local()
-
-            def thread_local_builder(searcher):
-                if not hasattr(_local, 'es'):
-                    _local.es = get_es()
-                return _local.es
-
-            searcher = S.es_builder(thread_local_builder)
-
-        This is also handy for building ES instances with
-        configuration defined in a config file.
-
-        """
-        return self._clone(next_step=('es_builder', builder_function))
 
     def indexes(self, *indexes):
         """
@@ -326,7 +363,27 @@ class S(object):
         Return a new S instance that returns ListSearchResults.
 
         :arg fields: the list of fields to have in the results.
-            By default this is at least ``['id']``.
+
+            With no arguments, returns a list of tuples of all the
+            data for that document.
+
+            With arguments, returns a list of tuples where the fields
+            in the tuple are in the order specified.
+
+        For example:
+
+        >>> list(S().values_list())
+        [(1, 'fred', 40), (2, 'brian', 30), (3, 'james', 45)]
+        >>> list(S().values_list('id', 'name'))
+        [(1, 'fred'), (2, 'brian'), (3, 'james')]
+        >>> list(S().values_list('name', 'id')
+        [('fred', 1), ('brian', 2), ('james', 3)]
+
+        .. Note::
+
+           If you don't specify fields, the data comes back in an
+           arbitrary order. It's probably best to specify fields or
+           use ``values_dict``.
 
         """
         return self._clone(next_step=('values_list', fields))
@@ -336,8 +393,19 @@ class S(object):
         Return a new S instance that returns DictSearchResults.
 
         :arg fields: the list of fields to have in the results.
-            By default, this won't specify fields and thus ES
-            will return everything.
+
+            With no arguments, this returns a list of dicts with all
+            the fields.
+
+            With arguments, it returns a list of dicts with the
+            specified fields.
+
+        For example:
+
+        >>> list(S().values_dict())
+        [{'id': 1, 'name': 'fred', 'age': 40}, ...]
+        >>> list(S().values_dict('id', 'name')
+        [{'id': 1, 'name': 'fred'}, ...]
 
         """
         return self._clone(next_step=('values_dict', fields))
@@ -358,7 +426,33 @@ class S(object):
     def filter(self, *filters, **kw):
         """
         Return a new S instance with filter args combined with
-        existing set.
+        existing set with AND.
+
+        :arg filters: this will be instances of F
+        :arg kw: this will be in the form of ``field__action=value``
+
+        Examples::
+
+        >>> s = S().filter(foo='bar')
+        >>> s = S().filter(F(foo='bar'))
+        >>> s = S().filter(foo='bar', bat='baz')
+        >>> s = S().filter(foo='bar').filter(bat='baz')
+
+        By default, everything is combined using AND. If you provide
+        multiple filters in a single filter call, those are ANDed
+        together. If you provide multiple filters in multiple filter
+        calls, those are ANDed together.
+
+        If you want something different, use the F class which supports
+        ``&`` (and), ``|`` (or) and ``~`` (not) operators. Then call
+        filter once with the resulting F instance.
+
+        See the documentation on :py:class:`elasticutils.F` for more
+        details on composing filters with F.
+
+        See the documentation on :py:class:`elasticutils.S` for adding
+        support for additional actions.
+
         """
         return self._clone(next_step=('filter', list(filters) + kw.items()))
 
@@ -413,7 +507,7 @@ class S(object):
         """
         # TODO: Implement `limit` kwarg if useful.
         # TODO: Once oedipus is no longer needed in SUMO, support ranked lists
-        # of before_match and after_match tags. ES can highlight more
+        # of before_match and after_match tags. ElasticSearch can highlight more
         # significant stuff brighter.
         return self._clone(next_step=('highlight', (fields, kwargs)))
 
@@ -431,18 +525,6 @@ class S(object):
             else:
                 new.steps.append((key, vals))
         return new
-
-    def count(self):
-        """
-        Return the number of hits for the search as an integer.
-        """
-        if self._results_cache:
-            return self._results_cache.count
-        else:
-            return self[:0].raw()['hits']['total']
-
-    def __len__(self):
-        return len(self._do_search())
 
     def __getitem__(self, k):
         new = self._clone()
@@ -498,7 +580,7 @@ class S(object):
             elif action == 'demote':
                 demote = (value[0], self._process_queries(value[1]))
             elif action == 'filter':
-                filters.extend(_process_filters(value))
+                filters.extend(self._process_filters(value))
             elif action == 'facet':
                 # value here is a (args, kwargs) tuple
                 facets.update(_process_facets(*value))
@@ -510,7 +592,7 @@ class S(object):
                 else:
                     highlight_fields |= set(value[0])
                 highlight_options.update(value[1])
-            elif action in ('es_builder', 'es', 'indexes', 'doctypes', 'boost'):
+            elif action in ('es', 'indexes', 'doctypes', 'boost'):
                 # Ignore these--we use these elsewhere, but want to
                 # make sure lack of handling it here doesn't throw an
                 # error.
@@ -581,12 +663,79 @@ class S(object):
         ret.update(options)
         return ret
 
+    def _process_filters(self, filters):
+        """Takes a list of filters and returns ES JSON API
+
+        :arg filters: list of F, (key, val) tuples, or dicts
+
+        :returns: list of ES JSON API filters
+
+        """
+        rv = []
+        for f in filters:
+            if isinstance(f, F):
+                if f.filters:
+                    rv.extend(self._process_filters(f.filters))
+                    continue
+
+            elif isinstance(f, dict):
+                key = f.keys()[0]
+                val = f[key]
+                key = key.strip('_')
+
+                if key not in ('or', 'and', 'not', 'filter'):
+                    raise InvalidFieldActionError(
+                        '%s is not a valid connector' % f.keys()[0])
+
+                if 'filter' in val:
+                    filter_filters = self._process_filters(val['filter'])
+                    if len(filter_filters) == 1:
+                        filter_filters = filter_filters[0]
+                    rv.append({key: {'filter': filter_filters}})
+                else:
+                    rv.append({key: self._process_filters(val)})
+
+            else:
+                key, val = f
+                key, field_action = split_field_action(key)
+                handler_name = 'process_filter_{0}'.format(field_action)
+
+                if field_action and hasattr(self, handler_name):
+                    rv.append(getattr(self, handler_name)(
+                            key, val, field_action))
+
+                elif key.strip('_') in ('or', 'and', 'not'):
+                    connector = key.strip('_')
+                    rv.append({connector: self._process_filters(val.items())})
+
+                elif field_action is None:
+                    if val is None:
+                        rv.append({'missing': {
+                                    'field': key, "null_value": True}})
+                    else:
+                        rv.append({'term': {key: val}})
+
+                elif field_action in ('startswith', 'prefix'):
+                    rv.append({'prefix': {key: val}})
+
+                elif field_action == 'in':
+                    rv.append({'in': {key: val}})
+
+                elif field_action in ('gt', 'gte', 'lt', 'lte'):
+                    rv.append({'range': {key: {field_action: val}}})
+
+                else:
+                    raise InvalidFieldActionError(
+                        '%s is not a valid field action' % field_action)
+
+        return rv
+
     def _process_queries(self, value):
         rv = []
         value = dict(value)
         or_ = value.pop('or_', [])
         for key, val in value.items():
-            field_name, field_action = _split(key)
+            field_name, field_action = split_field_action(key)
 
             # Boost by name__action overrides boost by name.
             boost = self.field_boosts.get(key)
@@ -641,33 +790,52 @@ class S(object):
         return self._results_cache
 
     def get_es(self, default_builder=get_es):
-        # The last one overrides earlier ones.
-        for action, value in reversed(self.steps):
-            if action == 'es_builder':
-                # es_builder overrides es
-                return value(self)
-            elif action == 'es':
-                return get_es(**value)
+        """Returns the ElasticSearch object to use.
 
-        return default_builder()
+        :arg default_builder: The function that takes a bunch of
+            arguments and generates a pyelasticsearch ElasticSearch
+            object.
+
+        .. Note::
+
+           If you desire special behavior regarding building the
+           ElasticSearch object for this S, subclass S and override
+           this method.
+
+        """
+        # .es() calls are incremental, so we go through them all and
+        # update bits that are specified.
+        args = {}
+        for action, value in self.steps:
+            if action == 'es':
+                args.update(**value)
+
+        # TODO: store the ElasticSearch on the S if we've already
+        # created one since we don't need to do it multiple times.
+        return default_builder(**args)
 
     def get_indexes(self, default_indexes=DEFAULT_INDEXES):
+        """Returns the list of indexes to act on."""
         for action, value in reversed(self.steps):
             if action == 'indexes':
-                return value
+                return list(value)
 
         if self.type is not None:
-            return self.type.get_index()
+            indexes = self.type.get_index()
+            if isinstance(indexes, basestring):
+                indexes = [indexes]
+            return indexes
 
         return default_indexes
 
     def get_doctypes(self, default_doctypes=DEFAULT_DOCTYPES):
+        """Returns the list of doctypes to use."""
         for action, value in reversed(self.steps):
             if action == 'doctypes':
-                return value
+                return list(value)
 
         if self.type is not None:
-            return self.type.get_mapping_type_name()
+            return [self.type.get_mapping_type_name()]
 
         return default_doctypes
 
@@ -678,27 +846,147 @@ class S(object):
         """
         qs = self._build_query()
         es = self.get_es()
-        try:
-            hits = es.search(qs, self.get_indexes(), self.get_doctypes())
-        except Exception:
-            log.error(qs)
-            raise
+
+        index = self.get_indexes()
+        doc_type = self.get_doctypes()
+
+        if doc_type and not index:
+            raise BadSearch(
+                'You must specify an index if you are specifying doctypes.')
+
+        hits = es.search(qs,
+                         index=self.get_indexes(),
+                         doc_type=self.get_doctypes())
+
         log.debug('[%s] %s' % (hits['took'], qs))
         return hits
 
+    def count(self):
+        """
+        Executes search and returns number of results as an integer.
+
+        :returns: integer
+
+        For example:
+
+        >>> s = S().query(name__prefix='Jimmy')
+        >>> count = s.count()
+
+        """
+        if self._results_cache:
+            return self._results_cache.count
+        else:
+            return self[:0].raw()['hits']['total']
+
+    def __len__(self):
+        """
+        Executes search and returns the number of results you'd get.
+
+        Executes search and returns number of results as an integer.
+
+        :returns: integer
+
+        For example:
+
+        >>> s = S().query(name__prefix='Jimmy')
+        >>> count = len(s)
+        >>> results = s().execute()
+        >>> count = len(results)
+        True
+
+        .. Note::
+
+           This is very different than calling ``.count()``. If you
+           call ``.count()`` you get the total number of results
+           that ElasticSearch thinks matches your search. If you call
+           ``len(s)``, then you get the number of results you'd get
+           if you executed the search. This factors in slices and
+           default from and size values.
+
+        """
+        return len(self._do_search())
+
+    def all(self):
+        """
+        Executes search and returns ALL search results.
+
+        :returns: `SearchResults` instance
+
+        For example:
+
+        >>> s = S().query(name__prefix='Jimmy')
+        >>> all_results = s.all()
+
+        .. Warning::
+
+           This returns ALL search results. The way it does this is by
+           calling ``.count()`` first to figure out how many to return,
+           then by slicing by that size and returning a list of ALL
+           search results.
+
+           Don't use this if you've got 1000s of results!
+
+        """
+        count = self.count()
+        return self[:count].execute()
+
+
+    def execute(self):
+        """
+        Executes search and returns a `SearchResults` object.
+
+        :returns: `SearchResults` instance
+
+        For example:
+
+        >>> s = S().query(name__prefix='Jimmy')
+        >>> results = s.execute()
+        """
+        return self._do_search()
+
     def __iter__(self):
+        """
+        Executes search and returns an iterator of results.
+
+        :returns: iterator of results
+
+        For example:
+
+        >>> s = S().query(name__prefix='Jimmy')
+        >>> for obj in s.execute():
+        ...     print obj['id']
+        ...
+
+        """
         return iter(self._do_search())
 
     def _raw_facets(self):
         return self._do_search().results.get('facets', {})
 
     def facet_counts(self):
+        """
+        Executes search and returns facet counts.
+
+        Example:
+
+        >>> s = S().query(name__prefix='Jimmy')
+        >>> facet_counts = s.facet_counts()
+
+        """
         facets = {}
         for key, val in self._raw_facets().items():
             if val['_type'] == 'terms':
                 facets[key] = [v for v in val['terms']]
             elif val['_type'] == 'range':
                 facets[key] = [v for v in val['ranges']]
+            elif val['_type'] == 'date_histogram':
+                facets[key] = [v for v in val['entries']]
+            elif val['_type'] == 'histogram':
+                facets[key] = [v for v in val['entries']]
+            else:
+                raise InvalidFacetType(
+                    'Facet _type "%s". key "%s" val "%r"' %
+                    (val['_type'], key, val))
         return facets
 
 
@@ -709,28 +997,28 @@ class MLT(object):
     ElasticSearch request unless you force it to by iterating over it
     or getting the length of the search results.
 
-    For example::
+    For example:
 
     >>> mlt = MLT(2034, index='addons_index', doctype='addon')
     >>> num_related_documents = len(mlt)
     >>> num_related_documents = list(mlt)
 
     """
-    def __init__(self, id_, s=None, fields=None, index=None, doctype=None,
-                 es=None, **query_params):
+    def __init__(self, id_, s=None, mlt_fields=None, index=None,
+                 doctype=None, es=None, **query_params):
         """
         When the MLT is evaluated, it generates a list of dict results.
 
         :arg id_: The id of the document we want to find more like.
-        :arg s: An instance of an S. The query is passed in the body of
-            the more like this request.
-        :arg fields: A list of fields to use for more like this.
+        :arg s: An instance of an S. Allows you to pass in a query which
+            will be used as the body of the more-like-this request.
+        :arg mlt_fields: A list of fields to look at for more like this.
         :arg index: The index to use. Falls back to the first index
-            listed in s.
+            listed in s.get_indexes().
         :arg doctype: The doctype to use. Falls back to the first
-            doctype listed in s.
-        :arg es: The ES object to use. If you don't provide one, then it
-            will create one for you.
+            doctype listed in s.get_doctypes().
+        :arg es: `The ElasticSearch` object to use. If you don't
+            provide one, then it will create one for you.
         :arg query_params: Any additional query parameters for the
             more like this call.
 
@@ -745,6 +1033,12 @@ class MLT(object):
             raise ValueError(
                 'Either you must provide a valid s or index and doc_type')
 
+        # v0.7: Check for the deprecated 'fields' argument and raise
+        # an error. Take this out for v1.0.
+        if 'fields' in query_params:
+            raise DeprecationWarning(
+                '"fields" argument is deprecated for "mlt_fields"')
+
         self.s = s
         if s is not None:
             # If an index or doctype isn't given, we use the first one
@@ -758,7 +1052,7 @@ class MLT(object):
             self.type = None
 
         self.id = id_
-        self.fields = fields
+        self.mlt_fields = mlt_fields
         self.es = es
         self.query_params = query_params
         self._results_cache = None
@@ -770,11 +1064,13 @@ class MLT(object):
         return len(self._do_search())
 
     def get_es(self):
-        """Returns an ES
+        """Returns an `ElasticSearch`.
 
-        * If there's an s, then it returns that ES.
-        * If the es was provided in the constructor, then it returns that ES.
-        * Otherwise, it creates a new ES and returns that.
+        * If there's an s, then it returns that `ElasticSearch`.
+        * If the es was provided in the constructor, then it returns
+          that `ElasticSearch`.
+        * Otherwise, it creates a new `ElasticSearch` and returns
+          that.
 
         Override this if that behavior isn't correct for you.
 
@@ -791,25 +1087,16 @@ class MLT(object):
         """
         es = self.get_es()
 
-        kwargs = {}
-        path = es._make_path([self.index, self.doctype, self.id, '_mlt'])
-
         params = dict(self.query_params)
+        mlt_fields = self.mlt_fields or params.pop('mlt_fields', [])
 
-        if self.fields and 'mlt_fields' not in params:
-            params['mlt_fields'] = ','.join(self.fields)
-        kwargs['params'] = params
+        body = self.s._build_query() if self.s else ''
 
-        if self.s:
-            kwargs['body'] = self.s._build_query()
+        hits = es.more_like_this(self.index, self.doctype, self.id, mlt_fields,
+                                 body, **params)
 
-        try:
-            hits = es._send_request('GET', path, **kwargs)
-            log.debug(hits)
-        except Exception:
-            log.error(kwargs)
-            raise
-        log.debug('[%s] %s' % (hits['took'], kwargs))
+        log.debug(hits)
+
         return hits
 
     def _do_search(self):
@@ -824,6 +1111,35 @@ class MLT(object):
 
 
 class SearchResults(object):
+    """
+    After executing a search, this is the class that manages the
+    results.
+
+    :property type: the mapping type of the S that created this
+        SearchResults instance
+    :property took: the amount of time the search took
+    :property count: the total results
+    :property results: the raw ElasticSearch search response
+    :property fields: the list of fields specified by values_list
+        or values_dict
+
+    When you iterate over this object, it returns the individual
+    search results in the shape you asked for (object, tuple, dict,
+    etc) in the order returned by ElasticSearch.
+
+    Example::
+
+        s = S().query(bio__text='archaeologist')
+        results = s.execute()
+
+        # Shows how long the search took
+        print results.took
+
+        # Shows the raw ElasticSearch response
+        print results.results
+
+    """
+
     def __init__(self, type, results, fields):
         self.type = type
         self.took = results.get('took', 0)
@@ -851,6 +1167,10 @@ class TupleResult(tuple):
 
 
 class DictSearchResults(SearchResults):
+    """
+    SearchResults subclass that returns a results in the form of a
+    dict.
+    """
     def set_objects(self, hits):
         key = 'fields' if self.fields else '_source'
         self.objects = [decorate_with_metadata(DictResult(r[key]), r)
@@ -858,6 +1178,10 @@ class DictSearchResults(SearchResults):
 
 
 class ListSearchResults(SearchResults):
+    """
+    SearchResults subclass that returns a results in the form of a
+    tuple.
+    """
     def set_objects(self, hits):
         if self.fields:
             getter = itemgetter(*self.fields)
@@ -876,7 +1200,7 @@ class ListSearchResults(SearchResults):
 
 
 def _convert_results_to_dict(r):
-    """Takes a results from ES and returns fields."""
+    """Takes a results from ElasticSearch and returns fields."""
     if 'fields' in r:
         return r['fields']
     if '_source' in r:
@@ -900,7 +1224,7 @@ class ObjectSearchResults(SearchResults):
 
 def decorate_with_metadata(obj, hit):
     """Return obj decorated with hit-scope metadata."""
-    # ES id
+    # ElasticSearch id
     obj._id = hit.get('_id', 0)
     # Source data
     obj._source = hit.get('_source', {})
@@ -924,10 +1248,28 @@ class MappingType(object):
 
     To extend this class:
 
-    1. implement ``get_index``.
+    1. implement ``get_indexes``.
     2. implement ``get_mapping_type_name``.
-    3. if this ties back to a model, implement ``get_model``
-       and possibly also ``get_object``.
+    3. if this ties back to a model, implement ``get_model`` and
+       possibly also ``get_object``.
+
+    For example::
+
+        class ContactType(MappingType):
+            @classmethod
+            def get_indexes(cls):
+                return 'contacts_index'
+
+            @classmethod
+            def get_mapping_type_name(cls):
+                return 'contact_type'
+
+            @classmethod
+            def get_model(cls):
+                return ContactModel
+
+            def get_object(self):
+                return self.get_model().get(id=self._id)
 
     """
     def __init__(self):
@@ -951,7 +1293,8 @@ class MappingType(object):
         """Returns the model instance
 
         This gets called when someone uses the ``.object`` attribute
-        which triggers lazy-loading of the object.
+        which triggers lazy-loading of the object this document is
+        based on.
 
         If this MappingType is associated with a model, then by
         default, it calls::
@@ -973,6 +1316,10 @@ class MappingType(object):
         """
         return self.get_model().get(id=self._id)
 
+
+    # TODO: Should this be "get_indexes" or "get_index"? Probably
+    # the latter.
+
     @classmethod
     def get_indexes(cls):
         """Returns the indexes to use for this mapping type.
@@ -980,12 +1327,13 @@ class MappingType(object):
         You can specify the indexes to use for this mapping type.
         This affects ``S`` built with this type.
 
-        By default, this is ["default"].
+        By default, raises NotImplementedError.
 
-        Override this if you want something different.
+        Override this to return the index this mapping type should
+        be indexed and searched in.
 
         """
-        return DEFAULT_INDEXES
+        raise NotImplementedError()
 
     @classmethod
     def get_mapping_type_name(cls):
@@ -994,12 +1342,12 @@ class MappingType(object):
         You can specify the mapping type name (also sometimes called the
         document type) with this method.
 
-        By default, this is None.
+        By default, raises NotImplementedError.
 
-        Override this if you want something different.
+        Override this to return the mapping type name.
 
         """
-        return DEFAULT_DOCTYPES
+        raise NotImplementedError()
 
     @classmethod
     def get_model(cls):

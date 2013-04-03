@@ -28,21 +28,12 @@ file:
    `es_required` will return and log a warning. This is useful while
    developing, so you don't have to have ElasticSearch running.
 
-.. data:: ES_DUMP_CURL
+.. data:: ES_URLS
 
-   If set to a file path all the requests that `ElasticUtils` makes
-   will be dumped into the designated file.
+   This is a list of ElasticSearch urls. In development this will look
+   like::
 
-   If set to a class instance, calls the ``.write()`` method with
-   the curl equivalents.
-
-   See :ref:`django-debugging` for more details.
-
-.. data:: ES_HOSTS
-
-   This is a list of ES hosts. In development this will look like::
-
-       ES_HOSTS = ['127.0.0.1:9200']
+       ES_URLS = ['http://localhost:9200']
 
 .. data:: ES_INDEXES
 
@@ -72,25 +63,27 @@ file:
    run queries for other models in `main_index` because that's the
    default.
 
+   Example 3::
+
+       ES_INDEXES = {'default': ['main_index'],
+                     'splugs': ['splugs_index']}
+
+   FIXME: The API allows for this. Pretty sure it should query
+   multiple indexes, but we have no tests for that and I haven't
+   tested it, either.
+
+
 .. data:: ES_TIMEOUT
 
-   Defines the timeout for the `ES` connection.  This defaults to 5
-   seconds.
+   Defines the timeout for the `ElasticSearch` connection.  This
+   defaults to 5 seconds.
 
 
-ES
-==
+ElasticSearch
+=============
 
-The `get_es()` in the Django contrib will helpfully cache your ES
-objects thread-local.
-
-It is built with the settings from your `django.conf.settings`.
-
-.. Note::
-
-   `get_es()` only caches the `ES` if you don't pass in any override
-   arguments. If you pass in override arguments, it doesn't cache it
-   and instead creates a new one.
+The `get_es()` in the Django contrib will use Django settings listed
+above to build the ElasticSearch object.
 
 
 Using with Django ORM models
@@ -188,8 +181,8 @@ explicitly specifying `.get_mapping()`.
         def get_mapping(cls):
             """Returns an ElasticSearch mapping."""
             return {
-                # The id is an integer, so store it as such. ES would have
-                # inferred this just fine.
+                # The id is an integer, so store it as such. ElasticSearch
+                # would have inferred this just fine.
                 'id': {'type': 'integer'},
 
                 # The name is a name---so we shouldn't analyze it
@@ -254,6 +247,14 @@ You can then utilize things such as
 automatically index all new items.
 
 
+View decorators
+---------------
+
+.. autofunction:: elasticutils.contrib.django.es_required
+
+.. autofunction:: elasticutils.contrib.django.es_required_or_50x
+
+
 Tasks
 -----
 
@@ -275,60 +276,49 @@ Writing tests
 
 :Requirements: Django, test_utils, nose
 
-In `elasticutils.contrib.django.estestcase`, is `ESTestCase` which can
-be subclassed in your app's test cases.
+When writing test cases for your ElasticUtils-using code, you'll want
+to do a few things:
+
+1. Default ``ES_DISABLED`` to True. This way, the tests that kick off
+   creating data but aren't testing search-specific things don't
+   additionally index stuff. That'll save you a bunch of test time.
+
+2. When testing ElasticUtils things, override the settings and set
+   ``ES_DISABLED`` to False.
+
+3. Use an ``ElasticSearchTestCase`` that sets up the indexes before
+   tests run and tears them down after they run.
+
+4. When testing, make sure you use an index name that's unique. You
+   don't want to run your tests and have them affect your production
+   index.
+
+In `elasticutils.contrib.django.estestcase`, is
+`ElasticSearchTestCase` which can be subclassed in your app's test
+cases. It's pretty basic. If it's not what you want, you should write
+your own or subclass it.
 
 It does the following:
 
-* If `ES_HOSTS` is empty it raises a `SkipTest`.
-* `self.es` is available from the `ESTestCase` class and any subclasses.
+* If ``ES_URLS`` is empty or nonexistent, it skips each individual
+  test.
+* If ElasticSearch specified by ``ES_URLS`` can't be connected to, then it
+  skips each individual test.
+* Overrides ``ES_DISABLED`` to True and ``ES_INDEXES`` to index names
+  that have "estest" appended to them so you're not stomping on
+  production indexes.
+* ``self.es`` is available from the ``ElasticSearchTestCase`` class
+  and any subclasses.
 * At the end of the test case the index is wiped.
 
-Example::
+Example usage::
 
-    from elasticutils.djangolib import ESTestCase
+    from elasticutils.contrib.django.estestcase import ElasticSearchTestCase
 
 
-    class TestQueries(ESTestCase):
+    class TestQueries(ElasticSearchTestCase):
         def test_query(self):
             ...
 
         def test_locked_filters(self):
             ...
-
-
-.. _django-debugging:
-
-Debugging
-=========
-
-You can set the ``settings.ES_DUMP_CURL`` to a few different things
-all of which can be helpful in debugging ElasticUtils.
-
-1. a file path
-
-   This will cause PyES to write the curl equivalents of the commands
-   it's sending to ElasticSearch to a file.
-
-   Example setting::
-
-       ES_DUMP_CURL = '/var/log/es_curl.log'
-
-
-   .. Note::
-
-      The file is not closed until the process ends. Because of that,
-      you don't see much in the file until it's done.
-
-
-2. a class instance that has a ``.write()`` method
-
-   PyES will call the ``.write()`` method with the curl equivalent and
-   then you can do whatever you want with it.
-
-   For example, this writes curl equivalent output to stdout::
-
-        class CurlDumper(object):
-            def write(self, s):
-                print s
-        ES_DUMP_CURL = CurlDumper()

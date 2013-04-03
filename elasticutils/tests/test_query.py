@@ -1,25 +1,20 @@
+from datetime import datetime, timedelta
+
 from nose.tools import eq_
 
-from elasticutils import F, InvalidFieldActionError
+from elasticutils import (
+    S, F, InvalidFieldActionError, InvalidFacetType, SearchResults)
 from elasticutils.tests import ElasticTestCase, facet_counts_dict
 
 
 class QueryTest(ElasticTestCase):
-    @classmethod
-    def setup_class(cls):
-        super(QueryTest, cls).setup_class()
-        if cls.skip_tests:
-            return
-
-        cls.create_index()
-        cls.index_data([
-                {'id': 1, 'foo': 'bar', 'tag': 'awesome', 'width': '2'},
-                {'id': 2, 'foo': 'bart', 'tag': 'boring', 'width': '7'},
-                {'id': 3, 'foo': 'car', 'tag': 'awesome', 'width': '5'},
-                {'id': 4, 'foo': 'duck', 'tag': 'boat', 'width': '11'},
-                {'id': 5, 'foo': 'train car', 'tag': 'awesome', 'width': '7'}
-            ])
-        cls.refresh()
+    data = [
+        {'id': 1, 'foo': 'bar', 'tag': 'awesome', 'width': '2'},
+        {'id': 2, 'foo': 'bart', 'tag': 'boring', 'width': '7'},
+        {'id': 3, 'foo': 'car', 'tag': 'awesome', 'width': '5'},
+        {'id': 4, 'foo': 'duck', 'tag': 'boat', 'width': '11'},
+        {'id': 5, 'foo': 'train car', 'tag': 'awesome', 'width': '7'}
+        ]
 
     def test_q(self):
         eq_(len(self.get_s().query(foo='bar')), 1)
@@ -85,51 +80,16 @@ class QueryTest(ElasticTestCase):
         with self.assertRaises(InvalidFieldActionError):
             len(self.get_s().query(foo__foo='awesome'))
 
-    def test_filter_empty_f(self):
-        eq_(len(self.get_s().filter(F() | F(tag='awesome'))), 3)
-        eq_(len(self.get_s().filter(F() & F(tag='awesome'))), 3)
-        eq_(len(self.get_s().filter(F() | F() | F(tag='awesome'))), 3)
-        eq_(len(self.get_s().filter(F() & F() & F(tag='awesome'))), 3)
-        eq_(len(self.get_s().filter(F())), 5)
-
-    def test_filter(self):
-        eq_(len(self.get_s().filter(tag='awesome')), 3)
-        eq_(len(self.get_s().filter(F(tag='awesome'))), 3)
-
-    def test_filter_and(self):
-        eq_(len(self.get_s().filter(tag='awesome', foo='bar')), 1)
-        eq_(len(self.get_s().filter(tag='awesome').filter(foo='bar')), 1)
-        eq_(len(self.get_s().filter(F(tag='awesome') & F(foo='bar'))), 1)
-
-    def test_filter_or(self):
-        eq_(len(self.get_s().filter(F(tag='awesome') | F(tag='boat'))), 4)
-
-    def test_filter_or_3(self):
-        eq_(len(self.get_s().filter(F(tag='awesome') | F(tag='boat') |
-                                     F(tag='boring'))), 5)
-        eq_(len(self.get_s().filter(or_={'foo': 'bar',
-                                          'or_': {'tag': 'boat',
-                                                  'width': '5'}
-                                          })), 3)
-
-    def test_filter_complicated(self):
-        eq_(len(self.get_s().filter(F(tag='awesome', foo='bar') |
-                                     F(tag='boring'))), 2)
-
-    def test_filter_not(self):
-        eq_(len(self.get_s().filter(~F(tag='awesome'))), 2)
-        eq_(len(self.get_s().filter(~(F(tag='boring') | F(tag='boat')))), 3)
-        eq_(len(self.get_s().filter(~F(tag='boat')).filter(~F(foo='bar'))), 3)
-        eq_(len(self.get_s().filter(~F(tag='boat', foo='barf'))), 5)
-
-    def test_filter_in(self):
-        eq_(len(self.get_s().filter(foo__in=['car', 'bar'])), 3)
-
-    def test_filter_bad_field_action(self):
-        with self.assertRaises(InvalidFieldActionError):
-            len(self.get_s().filter(F(tag__faux='awesome')))
-
     def test_boost(self):
+        """Boosted queries shouldn't raise a SearchPhaseExecutionException."""
+        # Note: There isn't an assertion here--we just want to make
+        # sure that it runs without throwing an exception.
+        q1 = (self.get_s()
+                  .boost(foo=4.0)
+                  .query(foo='car', foo__text='car', foo__text_phrase='car'))
+        list(q1)
+
+    def test_boost_overrides(self):
         def _get_queries(search):
             # The stuff we want is buried in the search and it's in
             # the 'must' list where each item in the list is a dict
@@ -161,6 +121,267 @@ class QueryTest(ElasticTestCase):
         #
         # Figured I'd mention that in case someone was looking at the
         # tests and was like, "Hey--this is missing!"
+
+    def test_execute(self):
+        assert isinstance(self.get_s().execute(), SearchResults)
+
+    def test_count(self):
+        assert isinstance(self.get_s().count(), int)
+
+    def test_len(self):
+        assert isinstance(len(self.get_s()), int)
+
+    def test_all(self):
+        assert isinstance(self.get_s().all(), SearchResults)
+
+    def test_order_by(self):
+        res = self.get_s().filter(tag='awesome').order_by('-width')
+        eq_([d['id'] for d in res], [5, 3, 1])
+
+    def test_explain(self):
+        qs = self.get_s().query(foo='car')
+
+        assert 'explain' not in qs._build_query()
+
+        qs = qs.explain(True)
+
+        # You put the explain in...
+        assert qs._build_query()['explain'] == True
+
+        qs = qs.explain(False)
+
+        # You take the explain out...
+        assert 'explain' not in qs._build_query()
+
+        # Shake it all about...
+        qs = qs.explain(True)
+
+        res = list(qs)
+        assert res[0]._explanation
+
+
+class FilterTest(ElasticTestCase):
+    mapping = {
+        ElasticTestCase.mapping_type_name: {
+            'properties': {
+                'id': {'type': 'integer'},
+                'foo': {'type': 'string'},
+                'tag': {'type': 'string'},
+                'width': {'type': 'string', 'null_value': True}
+                }
+            }
+        }
+
+    data = [
+        {'id': 1, 'foo': 'bar', 'tag': 'awesome', 'width': '2'},
+        {'id': 2, 'foo': 'bart', 'tag': 'boring', 'width': '7'},
+        {'id': 3, 'foo': 'car', 'tag': 'awesome', 'width': '5'},
+        {'id': 4, 'foo': 'duck', 'tag': 'boat', 'width': '11'},
+        {'id': 5, 'foo': 'train car', 'tag': 'awesome', 'width': '7'},
+        {'id': 6, 'foo': 'caboose', 'tag': 'end', 'width': None}
+        ]
+
+    def test_filter_empty_f(self):
+        s = self.get_s().filter(F())
+        eq_(s._build_query(), {})
+        eq_(s.count(), 6)
+
+    def test_filter_empty_f_or_f(self):
+        s = self.get_s().filter(F() | F(tag='awesome'))
+        eq_(s._build_query(), {'filter': {'term': {'tag': 'awesome'}}})
+        eq_(s.count(), 3)
+
+    def test_filter_empty_f_and_f(self):
+        s = self.get_s().filter(F() & F(tag='awesome'))
+        eq_(s._build_query(), {'filter': {'term': {'tag': 'awesome'}}})
+        eq_(s.count(), 3)
+
+    def test_filter_empty_f_or_empty_f_or_f(self):
+        s = self.get_s().filter(F() | F() | F(tag='awesome'))
+        eq_(s._build_query(), {'filter': {'term': {'tag': 'awesome'}}})
+        eq_(s.count(), 3)
+
+    def test_filter_empty_f_and_empty_f_and_f(self):
+        s = self.get_s().filter(F() & F() & F(tag='awesome'))
+        eq_(s._build_query(), {'filter': {'term': {'tag': 'awesome'}}})
+        eq_(s.count(), 3)
+
+    def test_filter_empty_f_not(self):
+        s = self.get_s().filter(~F())
+        eq_(s._build_query(), {})
+        eq_(s.count(), 6)
+
+    def test_filter(self):
+        eq_(len(self.get_s().filter(tag='awesome')), 3)
+        eq_(len(self.get_s().filter(F(tag='awesome'))), 3)
+
+    def test_filter_and(self):
+        eq_(len(self.get_s().filter(tag='awesome', foo='bar')), 1)
+        eq_(len(self.get_s().filter(tag='awesome').filter(foo='bar')), 1)
+        eq_(len(self.get_s().filter(F(tag='awesome') & F(foo='bar'))), 1)
+
+    def test_filter_or(self):
+        s = self.get_s().filter(F(tag='awesome') | F(tag='boat'))
+        eq_(s.count(), 4)
+
+    def test_filter_or_3(self):
+        s = self.get_s().filter(F(tag='awesome') | F(tag='boat') |
+                                F(tag='boring'))
+        eq_(s._build_query(), {
+                'filter': {
+                    'or': [
+                        {'term': {'tag': 'awesome'}},
+                        {'term': {'tag': 'boat'}},
+                        {'term': {'tag': 'boring'}}
+                    ]
+                }
+        })
+        eq_(s.count(), 5)
+
+        # This is kind of a crazy case.
+        s = self.get_s().filter(or_={'foo': 'bar',
+                                     'or_': {'tag': 'boat', 'width': 5}})
+        eq_(s._build_query(), {
+                'filter': {
+                    'or': [
+                        {'or': [
+                                {'term': {'width': 5}},
+                                {'term': {'tag': 'boat'}}
+                        ]},
+                        {'term': {'foo': 'bar'}}
+                    ]
+                }
+        })
+        eq_(s.count(), 3)
+
+    def test_filter_complicated(self):
+        eq_(len(self.get_s().filter(F(tag='awesome', foo='bar') |
+                                     F(tag='boring'))), 2)
+
+    def test_filter_not(self):
+        s = self.get_s().filter(~F(tag='awesome'))
+        eq_(s._build_query(), {
+                'filter': {
+                    'not': {
+                        'filter': {'term': {'tag': 'awesome'}}
+                    }
+                }
+        })
+        eq_(s.count(), 3)
+
+        s = self.get_s().filter(~(F(tag='boring') | F(tag='boat')))
+        eq_(s._build_query(), {
+                'filter': {
+                    'not': {
+                        'filter': {
+                            'or': [
+                                {'term': {'tag': 'boring'}},
+                                {'term': {'tag': 'boat'}}
+                            ]
+                        }
+                    }
+                }
+        })
+        eq_(s.count(), 4)
+
+        s = self.get_s().filter(~F(tag='boat')).filter(~F(foo='bar'))
+        eq_(s._build_query(), {
+                'filter': {
+                    'and': [
+                        {'not': {'filter': {'term': {'tag': 'boat'}}}},
+                        {'not': {'filter': {'term': {'foo': 'bar'}}}}
+                    ]
+                }
+        })
+        eq_(s.count(), 4)
+
+        s = self.get_s().filter(~F(tag='boat', foo='barf'))
+        eq_(s._build_query(), {
+                'filter': {
+                    'not': {
+                        'filter': {
+                            'and': [
+                                {'term': {'foo': 'barf'}},
+                                {'term': {'tag': 'boat'}}
+                            ]
+                        }
+                    }
+                }
+        })
+        eq_(s.count(), 6)
+
+    def test_filter_in(self):
+        eq_(len(self.get_s().filter(foo__in=['car', 'bar'])), 3)
+
+    def test_filter_bad_field_action(self):
+        with self.assertRaises(InvalidFieldActionError):
+            len(self.get_s().filter(F(tag__faux='awesome')))
+
+    def test_filter_with_none_value(self):
+        eq_(len(self.get_s().filter(width=None)), 1)
+
+    def test_f_mutation_with_and(self):
+        """Make sure AND doesn't mutate operands."""
+        f1 = F(fielda='tag', fieldb='boat')
+        f2 = F(fieldc='car')
+
+        f1 & f2
+        # Should only contain f1 filters.
+        eq_(sorted(f1.filters[0]['and']),
+            sorted([('fielda', 'tag'), ('fieldb', 'boat')]))
+
+        # Should only contain f2 filters.
+        eq_(f2.filters, [('fieldc', 'car')])
+
+    def test_f_mutation_with_or(self):
+        """Make sure OR doesn't mutate operands."""
+        f1 = F(fielda='tag', fieldb='boat')
+        f2 = F(fieldc='car')
+
+        f1 | f2
+        # Should only contain f1 filters.
+        eq_(sorted(f1.filters[0]['and']),
+            sorted([('fielda', 'tag'), ('fieldb', 'boat')]))
+
+        # Should only contain f2 filters.
+        eq_(f2.filters, [('fieldc', 'car')])
+
+    def test_f_mutation_with_not(self):
+        """Make sure NOT doesn't mutate operands."""
+        f1 = F(fielda='tag')
+        f2 = ~f1
+
+        # Change f2 to see if it changes f1.
+        f2.filters[0]['not']['filter'] = [('fielda', 'boat')]
+
+        # Should only contain f1 filters.
+        eq_(f1.filters, [('fielda', 'tag')])
+
+        # Should only contain f2 tweaked filter.
+        eq_(f2.filters, [{'not': {'filter': [('fielda', 'boat')]}}])
+
+    def test_funkyfilter(self):
+        """Test implementing filter processors"""
+        class FunkyS(S):
+            def process_filter_funkyfilter(self, key, val, field_action):
+                return {'funkyfilter': {'field': key, 'value': val}}
+
+        s = FunkyS().filter(foo__funkyfilter='bar')
+        eq_(s._build_query(), {
+                'filter': {
+                    'funkyfilter': {'field': 'foo', 'value': 'bar'}
+                }
+        })
+
+
+class FacetTest(ElasticTestCase):
+    data = [
+        {'id': 1, 'foo': 'bar', 'tag': 'awesome', 'width': '2'},
+        {'id': 2, 'foo': 'bart', 'tag': 'boring', 'width': '7'},
+        {'id': 3, 'foo': 'car', 'tag': 'awesome', 'width': '5'},
+        {'id': 4, 'foo': 'duck', 'tag': 'boat', 'width': '11'},
+        {'id': 5, 'foo': 'train car', 'tag': 'awesome', 'width': '7'}
+        ]
 
     def test_facet(self):
         qs = self.get_s().facet('tag')
@@ -208,36 +429,112 @@ class QueryTest(ElasticTestCase):
         eq_(facet_counts_dict(qs, 'tag'),
             dict(awesome=3, boring=1, boat=1))
 
-    def test_order_by(self):
-        res = self.get_s().filter(tag='awesome').order_by('-width')
-        eq_([d['id'] for d in res], [5, 3, 1])
 
-    def test_repr(self):
-        res = self.get_s()[:2]
-        list_ = list(res)
+class FacetNoDataTest(ElasticTestCase):
+    """This is for tests that generate their own data and need
+    to be cleaned up.
 
-        eq_(repr(list_), repr(res))
+    """
 
-    def test_explain(self):
-        qs = self.get_s().query(foo='car')
+    def test_facet_date_histogram(self):
+        """facet_raw with date_histogram works."""
+        today = datetime.now()
+        tomorrow = today + timedelta(days=1)
 
-        assert 'explain' not in qs._build_query()
+        FacetTest.create_index()
+        FacetTest.index_data([
+                {'id': 1, 'created': today},
+                {'id': 2, 'created': today},
+                {'id': 3, 'created': tomorrow},
+                {'id': 4, 'created': tomorrow},
+                {'id': 5, 'created': tomorrow},
+            ])
+        FacetTest.refresh()
 
-        qs = qs.explain(True)
+        qs = (self.get_s()
+              .facet_raw(created1={
+                    'date_histogram': {
+                        'interval': 'day', 'field': 'created'
+                        }
+                    }))
 
-        # You put the explain in...
-        assert qs._build_query()['explain'] == True
+        # TODO: This is a mediocre test because it doesn't test the
+        # dates and it probably should.
+        facet_counts = [item['count']
+                        for item in qs.facet_counts()['created1']]
+        eq_(sorted(facet_counts), [2, 3])
 
-        qs = qs.explain(False)
+    def test_facet_normal_histogram(self):
+        """facet_raw with normal histogram works."""
 
-        # You take the explain out...
-        assert 'explain' not in qs._build_query()
+        FacetTest.create_index()
+        FacetTest.index_data([
+                {'id': 1, 'value': 1},
+                {'id': 2, 'value': 1},
+                {'id': 3, 'value': 1},
+                {'id': 4, 'value': 2},
+                {'id': 5, 'value': 2},
+                {'id': 6, 'value': 3},
+                {'id': 7, 'value': 3},
+                {'id': 8, 'value': 3},
+                {'id': 9, 'value': 4},
+            ])
+        FacetTest.refresh()
 
-        # Shake it all about...
-        qs = qs.explain(True)
+        qs = (self.get_s()
+              .facet_raw(created1={
+                    'histogram': {
+                        'interval': 2, 'field': 'value'
+                        }
+                    }))
 
-        res = list(qs)
-        assert res[0]._explanation
+        data = qs.facet_counts()
+        eq_(data, {
+                u'created1': [
+                    {u'key': 0, u'count': 3},
+                    {u'key': 2, u'count': 5},
+                    {u'key': 4, u'count': 1},
+                ]
+            })
+
+    def test_invalid_field_type(self):
+        """Invalid _type should raise InvalidFacetType."""
+        FacetTest.create_index()
+        FacetTest.index_data([
+                {'id': 1, 'age': 30},
+                {'id': 2, 'age': 40}
+            ])
+        FacetTest.refresh()
+
+        # Note: This uses a statistcal facet. If we implement handling
+        # for that, then we need to pick another facet type to fail on
+        # or do the right thing and mock the test.
+        # Note: This used to use a histogram facet, but that was
+        # implemented.
+        self.assertRaises(
+            InvalidFacetType,
+            lambda: (self.get_s()
+                     .facet_raw(created1={
+                        'statistical': {'field': 'age'}})
+                     .facet_counts()))
+
+
+class HighlightTest(ElasticTestCase):
+    @classmethod
+    def setup_class(cls):
+        super(HighlightTest, cls).setup_class()
+        if cls.skip_tests:
+            return
+
+        cls.create_index()
+        cls.index_data([
+                {'id': 1, 'foo': 'bar', 'tag': 'awesome', 'width': '2'},
+                {'id': 2, 'foo': 'bart', 'tag': 'boring', 'width': '7'},
+                {'id': 3, 'foo': 'car', 'tag': 'awesome', 'width': '5'},
+                {'id': 4, 'foo': 'duck', 'tag': 'boat', 'width': '11'},
+                {'id': 5, 'foo': 'train car', 'tag': 'awesome', 'width': '7'}
+            ])
+        cls.refresh()
 
     def test_highlight_with_dict_results(self):
         """Make sure highlighting with dict-style results works.

@@ -14,15 +14,16 @@ ElasticSearch simple.
 
 For example::
 
-   q = (S().filter(product='firefox')
+   q = (S().es(urls=['http://localhost:9200'])
+           .indexes('addon_index')
+           .doctypes('addon')
+           .filter(product='firefox')
            .filter(version='4.0', platform='all')
+           .query(title='Example')
            .facet(products={'field': 'product', 'global': True})
            .facet(versions={'field': 'version'})
            .facet(platforms={'field': 'platform'})
-           .facet(types={'field': 'type'})
-           .doctypes('addon')
-           .indexes('addon_index')
-           .query(title='Example'))
+           .facet(types={'field': 'type'}))
 
 
 The ElasticSearch REST API curl would look like this::
@@ -85,19 +86,34 @@ the `ElasticSearch JSON`.
      Documentation on curl
 
 
-All about S
-===========
+All about S: ``S``
+==================
 
-Basic untyped S
----------------
+What is S?
+----------
 
-`S` is the class that you instantiate to create a search. For example::
+:py:class:`elasticutils.S` is the class that you instantiate to define
+an ElasticSearch search. For example::
 
     searcher = S()
 
+This creates an :py:class:`elasticutils.S` with using the defaults:
 
-`S` has a bunch of methods that all return a new `S` with additional
-accumulated search criteria.
+* uses an :py:class:`pyelasticsearch.client.ElasticSearch` instance
+  configured to connect to ``http://localhost:9200`` -- call ``.es()``
+  to specify connection parameters
+* searches across all indexes -- call :py:meth:`elasticutils.S.indexes()` to specify
+  indexes
+* searches across all doctypes -- call :py:meth:`elasticutils.S.doctypes()` to specify
+  doctypes
+
+
+S is chainable
+--------------
+
+:py:class:`elasticutils.S` has methods that return a new S instance
+with the additional specified criteria. In this way S is chainable and
+you can reuse S objects for your searches.
 
 For example::
 
@@ -114,21 +130,25 @@ all.
 
 `s2` has a query.
 
-`s3` has everything in `s2` plus a ``awesome=True`` filter.
+`s3` has everything in `s2` with a ``awesome=True`` filter.
 
 `s4` has everything in `s2` with a ``awesome=False`` filter.
 
-When you create an `S` with no type, it's called an "untyped S". If
-you don't specify ``.values_dict`` or ``.values_list``, then your
-search results are in the form of a sequence of `DefaultMappingType`
-instances. More about this in :ref:`queries-mapping-type`.
 
+S can be typed and untyped
+--------------------------
 
-Typed S
--------
+When you create an :py:class:`elasticutils.S` with no type, it's
+called an `untyped S`.
 
-You can also construct a `typed S` which is an `S` with a
-`MappingType` subclass. For example::
+If you don't call :py:meth:`elasticutils.S.values_dict()` or
+:py:meth:`elasticutils.S.values_list()`, then your search results are
+in the form of a sequence of
+:py:class:`elasticutils.DefaultMappingType` instances. More about this
+in :ref:`queries-mapping-type`.
+
+You can also construct a `typed S` which is an S with a
+:py:class:`elasticutils.MappingType` subclass. For example::
 
     from elasticutils import MappingType, S
 
@@ -142,18 +162,236 @@ You can also construct a `typed S` which is an `S` with a
             return 'mymappingtype'
 
 
-    results = S(MyMappingType).query(title__text='plugins')
+    results = (S(MyMappingType).es(urls=['http://localhost:9200'])
+                               .query(title__text='plugins'))
 
 
-``results`` will be an iterable of `MyMappingType` instances---one for
+``results`` will be an iterable of MyMappingType instances---one for
 each search result.
+
+
+S can be sliced
+---------------
+
+By default ElasticSearch gives you the first 10 results.
+
+If you want something different than that, :py:class:`elasticutils.S`
+supports slicing allowing you to get back the specific results you're
+looking for.
+
+For example::
+
+    some_s = S()
+
+    results = some_s[:10]    # returns first 10 results
+    results = some_s[10:20]  # returns results 10 through 19
+
+
+The slicing is chainable, too::
+
+    some_s = S()[:10]
+
+    first_ten_pitchers = some_s.filter(position='pitcher')
+    first_ten_catchers = some_s.filter(position='catcher')
+
+
+.. Note::
+
+   The slice happens on the ElasticSearch side---it doesn't pull all
+   the results back and then slice them in Python. Ew.
+
+
+.. seealso::
+
+   http://www.elasticsearch.org/guide/reference/api/search/from-size.html
+     ElasticSearch from / size documentation
+
+
+S is lazy
+---------
+
+The search won't execute until you do one of the following:
+
+1. use the :py:class:`elasticutils.S` in an iterable context
+2. call :py:func:`len` on a :py:class:`elasticutils.S`
+3. call the :py:meth:`elasticutils.S.execute`,
+   :py:meth:`elasticutils.S.all`,
+   :py:meth:`elasticutils.S.count` or
+   :py:meth:`elasticutils.S.facet_counts` methods
+
+Once you execute the search, then it will cache the results and
+further uses of that :py:class:`elasticutils.S` will operate on the
+same results.
+
+
+S results can be returned in many shapes
+----------------------------------------
+
+If you have a `typed S` (e.g. ``S(MappingType)``), then by default,
+results will be instances of that type.
+
+If you have an `untyped S` (e.g. ``S()``), then by default, results
+will be DefaultMappingType.
+
+:py:meth:`elasticutils.S.values_list()` gives you a list of
+tuples. See documentation for more details.
+
+:py:meth:`elasticutils.S.values_dict()` gives you a list of dicts. See
+documentation for more details.
+
+If you use :py:meth:`elasticutils.S.execute()`, you get back a
+:py:class:`elasticutils.SearchResults` instance which has additional
+useful bits including the raw response from ElasticSearch. See
+documentation for details.
+
+
+.. _queries-mapping-type:
+
+Mapping types
+=============
+
+:py:class:`elasticutils.MappingType` gives you a way to centralize
+concerns regarding documents you're storing in your ElasticSearch
+index. When you do searches with MappingTypes, you get back those
+results as an iterable of MappingTypes by default.
+
+For example, say you had a description field and wanted to have a
+truncated version of it. You could do it this way::
+
+    class MyMappingType(MappingType):
+
+        # ... missing code here
+
+        def description_truncated(self):
+            return self.description[:100]
+
+    results = S(MyMappingType).query(description__text='stormy night')
+
+    print list(results)[0].description_truncated()
+
+
+You can relate a MappingType to a database model allowing you to link
+documents in the ElasticSearch index back to their origins in a
+lazy-loading way. This is done by subclassing MappingType and
+implementing the ``get_object()`` method. You can then access the
+origin using the ``object`` property.
+
+For example::
+
+    class MyMappingType(MappingType):
+
+        # ... missing code here
+
+        def get_object(self):
+            return self.get_model().objects.get(pk=self._id)
+
+    results = S(MyMappingType).filter(height__gte=72)[:1]
+
+    first = list(results)[0]
+
+    # This prints "height" which comes from the ElasticSearch
+    # document
+    print first.height
+
+    # This prints "height" which comes from the database data
+    # that the ElasticSearch document is based on. This is the
+    # first time ``.object`` is used, so it does the db hit
+    # here.
+    print first.object.height
+
+
+The most basic MappingType is the DefaultMappingType which is returned
+if you don't specify a MappingType and also don't call
+:py:meth:`elasticutils.S.values_dict()` or
+:py:meth:`elasticutils.S.values_list()`. The DefaultMappingType lets
+you access search result fields as instance attributes or as keys::
+
+    res.description
+    res['description']
+
+The latter syntax is helpful when there are attributes defined on the
+class that have the same name as the document field.
+
+See :py:class:`elasticutils.MappingType` for documentation on creating
+MappingTypes.
+
+
+What to search
+==============
+
+Specifying connection parameters: ``es``
+----------------------------------------
+
+:py:class:`elasticutils.S` will generate an
+:py:class:`pyelasticsearch.client.ElasticSearch` object that connects
+to ``http://localhost:9200`` by default. That's usually not what
+you want. You can use the :py:meth:`elasticutils.S.es()` method to
+specify the arguments used to create the ElasticSearch object.
+
+For example::
+
+    ES_URLS = ['http://localhost:9200']
+
+    q = S().es(urls=ES_URLS)
+    q = S().es(urls=ES_URLS, timeout=10)
+
+See :ref:`es-chapter` for the list of arguments you can pass in.
+
+
+Specifying indexes to search: ``indexes``
+-----------------------------------------
+
+An `untyped S` will search all indexes by default.
+
+A `typed S` will search the index returned by the
+:py:meth:`elasticutils.MappingType.get_indexes()` method.
+
+If that's not what you want, use the
+:py:meth:`elasticutils.S.indexes()` method.
+
+For example, this searches all indexes::
+
+    q = S()
+
+This searches just "someindex"::
+
+    q = S().indexes('someindex')
+
+This searches "thisindex" and "thatindex"::
+
+    q = S().indexes('thisindex', 'thatindex')
+
+
+
+Specifying doctypes to search: ``doctypes``
+-------------------------------------------
+
+An `untyped S` will search all doctypes by default.
+
+A `typed S` will search the doctype returned by the
+:py:meth:`elasticutils.MappingType.get_mapping_type_name()` method.
+
+If that's not what you want, then you should use the
+:py:meth:`elasticutils.S.doctypes()` method.
+
+For example, this searches all doctypes::
+
+    q = S()
+
+This searches just the "sometype" doctype::
+
+    q = S().doctypes('sometype')
+
+This searches "thistype" and "thattype"::
+
+    q = S().doctypes('thistype', 'thattype')
 
 
 Match All
 =========
 
-By default ``S()`` with no filters or queries specified will do a
-``match_all`` query in ElasticSearch.
+By default, :py:class:`elasticutils.S` with no filters or queries
+specified will do a ``match_all`` query in ElasticSearch.
 
 .. seealso::
 
@@ -170,23 +408,33 @@ things are very different.
 A filter determines whether a document is in the results set or
 not. If you do a term filter on whether field `foo` has value `bar`,
 then the result set ONLY has documents where `foo` has value `bar`.
+Filters are fast and filter results are cached in ElasticSearch when
+appropriate.
 
 A query affects the score for a document. If you do a term query on
 whether field `foo` has value `bar`, then the result set will score
 documents where the query holds true higher than documents where the
-query does not hold true.
+query does not hold true. Queries are slower than filters and
+query results are not cached in ElasticSearch.
 
 The other place where this affects things is when you specify
 facets. See :ref:`queries-chapter-facets-section` for details.
 
 
-Queries
-=======
+.. seealso::
 
-The query is specified by keyword arguments to the ``query()``
-method. The key of the keyword argument is parsed splitting on ``__``
-(that's two underscores) with the first part as the "field" and the
-second part as the "field action".
+   http://www.elasticsearch.org/guide/reference/query-dsl/
+     ElasticSearch Filters and Caching notes
+
+
+Queries: ``query``
+==================
+
+The query is specified by keyword arguments to the
+:py:meth:`elasticutils.S.query()` method. The key of the keyword
+argument is parsed splitting on ``__`` (that's two underscores) with
+the first part as the "field" and the second part as the "field
+action".
 
 For example::
 
@@ -221,7 +469,7 @@ query_string            query_string query [2]_
 .. [1] You can also use ``startswith``, but that's deprecated.
 
 .. [2] When doing ``query_string`` queries, if the query text is malformed
-   it'll raise a `SearchPhaseExecutionException:` exception.
+   it'll raise a `SearchPhaseExecutionException` exception.
 
 
 .. seealso::
@@ -248,8 +496,8 @@ query_string            query_string query [2]_
      ElasticSearch docs on query_string queries
 
 
-Filters
-=======
+Filters: ``filter``
+===================
 
 ::
 
@@ -260,16 +508,18 @@ Filters
 will do a query for "taco trucks" in the title field and filter on the
 style field for 'korean'. This is how we find Korean Taco Trucks.
 
-As with ``query()``, ``filter()`` allow for you to specify field
+As with :py:meth:`elasticutils.S.query()`,
+:py:meth:`elasticutils.S.filter()` allow for you to specify field
 actions for the filters:
 
-================  ====================
-field action      elasticsearch filter
-================  ====================
-in                Terms filter
-gt, gte, lt, lte  Range filter
-(no action)       Term filter
-================  ====================
+===================  ====================
+field action         elasticsearch filter
+===================  ====================
+in                   Terms filter
+gt, gte, lt, lte     Range filter
+prefix, startswith   Prefix filter
+(no action)          Term filter
+===================  ====================
 
 
 .. seealso::
@@ -283,12 +533,15 @@ gt, gte, lt, lte  Range filter
    http://www.elasticsearch.org/guide/reference/query-dsl/range-filter.html
      ElasticSearch docs for range filter
 
+   http://www.elasticsearch.org/guide/reference/query-dsl/prefix-filter.html
+     ElasticSearch docs for prefix filter
+
    http://www.elasticsearch.org/guide/reference/query-dsl/term-filter.html
      ElasticSearch docs for term filter
 
 
-Advanced filters and F
-======================
+Advanced filters: ``filter`` and ``F``
+======================================
 
 Calling filter multiple times is equivalent to an "and"ing of the
 filters.
@@ -315,7 +568,7 @@ This translates to::
 in elasticutils JSON.
 
 You can do the same thing by putting both filters in the same
-``.filter()`` call.
+:py:meth:`elasticutils.S.filter()` call.
 
 For example::
 
@@ -354,8 +607,8 @@ That translates to::
 
 But, that's kind of icky looking.
 
-So, we've also got an ``F`` class that makes this sort of thing
-easier.
+So, we've also got an :py:meth:`elasticutils.F` class that makes this
+sort of thing easier.
 
 You can do the previous example with ``F`` like this::
 
@@ -394,11 +647,9 @@ That translates to::
    }
 
 
-``F`` supports AND, OR, and NOT operators which are ``&``, ``|`` and
-``~`` respectively.
+F supports ``&`` (and), ``|`` (or) and ``~`` (not) operations.
 
-Additionally, you can create an empty ``F`` and build it
-incrementally::
+Additionally, you can create an empty F and build it incrementally::
 
     qs = S()
     f = F()
@@ -410,19 +661,26 @@ incrementally::
     qs = qs.filter(f)
 
 If neither `some_crazy_thing` or `some_other_crazy_thing` are
-``True``, then ``F`` will be empty. That's ok because empty filters
-are ignored.
+``True``, then F will be empty. That's ok because empty filters are
+ignored.
+
+.. Note::
+
+   If ElasticUtils doesn't have support for filters you need, you can
+   subclass :py:class:`elasticutils.S` and add ``process_filter_X``
+   methods. See the documentation for :py:class:`elasticutils.S` for
+   more details.
 
 
-Query-time field boosting
-=========================
+Query-time field boosting: ``boost``
+====================================
 
 ElasticSearch allows you to boost scores for fields specified in the
 search query at query-time.
 
 ElasticUtils allows you to specify query-time field boosts with
-``.boost()``. It takes a set of arguments where the keys are either
-field names or field name + '__' + field action.
+:py:meth:`elasticutils.S.boost()`. It takes a set of arguments where
+the keys are either field names or field name + ``__`` + field action.
 
 Here's an example::
 
@@ -452,10 +710,10 @@ only to that field name and field action. For example::
 will only apply the 4.0 boost to ``title__prefix``.
 
 
-Ordering
-========
+Ordering: ``order_by``
+======================
 
-You can order search results by specified fields::
+You can change the  order search results by specified fields::
 
     q = (S().query(title='trucks')
             .order_by('title')
@@ -475,8 +733,8 @@ You can also sort by the computed field ``_score``.
      ElasticSearch docs on sort parameter in the Search API
 
 
-Demoting
-========
+Demoting: ``demote``
+====================
 
 You can demote documents that match query criteria::
 
@@ -488,13 +746,14 @@ description with a fraction boost of 0.5.
 
 .. Note::
 
-   You can only call ``.demote()`` once. Calling it again overwrites
-   previous calls.
+   You can only call :py:meth:`elasticutils.S.demote()` once. Calling
+   it again overwrites previous calls.
 
 This is implemented using the `boosting query` in ElasticSearch.
-Anything you specify with ``.query()`` goes into the `positive`
-section. The `negative query` and `negative boost` portions are
-specified as the first and second arguments to ``.demote()``.
+Anything you specify with :py:meth:`elasticutils.S.query()` goes into
+the `positive` section. The `negative query` and `negative boost`
+portions are specified as the first and second arguments to
+:py:meth:`elasticutils.S.demote()`.
 
 .. Note::
 
@@ -514,12 +773,13 @@ specified as the first and second arguments to ``.demote()``.
      ElasticSearch docs on boosting query (which are as clear as mud)
 
 
-Highlighting
-============
+Highlighting: ``highlight``
+===========================
 
 ElasticUtils allows you to highlight excerpts that match the query
-using the ``.highlight()`` transform. This returns data that will be
-in every item in the search results list as ``_highlight``.
+using the :py:meth:`elasticutils.S.highlight()` transform. This
+returns data that will be in every item in the search results list as
+``_highlight``.
 
 For example, let's do a query on a search corpus of knowledge base
 articles for articles with the word "crash" in them::
@@ -563,8 +823,9 @@ The "highlight" default is to wrap the matched text with ``<em>`` and
                        pre_tags=['<b>'],
                        post_tags=['</b>']))
 
-If you need to clear the highlight, call ``.highlight()`` with
-``None``. For example, this search won't highlight anything::
+If you need to clear the highlight, call
+:py:meth:`elasticutils.S.highlight()` with ``None``. For example, this
+search won't highlight anything::
 
     q = (S().query(title__text='crash')
             .highlight('title')          # highlights 'title' field
@@ -585,8 +846,8 @@ If you need to clear the highlight, call ``.highlight()`` with
 
 .. _queries-chapter-facets-section:
 
-Facets
-======
+Facets: ``facet``
+=================
 
 Basic facets
 ------------
@@ -609,11 +870,11 @@ That translates to::
          }
     }
 
-Note that the fieldname you provide in the ``.facet()`` call becomes
-the facet name as well.
+Note that the fieldname you provide in the
+:py:meth:`elasticutils.S.facet()` call becomes the facet name as well.
 
-The facet counts are available through ``.facet_counts()`` on the `S`
-instance. For example::
+The facet counts are available through
+:py:meth:`elasticutils.S.facet_counts()`. For example::
 
     q = (S().query(title='taco trucks')
             .facet('style', 'location'))
@@ -753,12 +1014,12 @@ That translates to this::
 
 
 
-Facets... RAW!
---------------
+Facets... RAW!: ``facet_raw``
+-----------------------------
 
 ElasticSearch facets can do a lot of other things. Because of this,
-there exists ``.facet_raw()`` which will do whatever you need it to.
-Specify key/value args by facet name.
+there exists :py:meth:`elasticutils.S.facet_raw()` which will do
+whatever you need it to. Specify key/value args by facet name.
 
 For example, you can do the first facet example by::
 
@@ -788,8 +1049,9 @@ That translates to::
 .. Warning::
 
    If for some reason you have specified a facet with the same name
-   using both ``.facet()`` and ``.facet_raw()``, the ``.facet_raw()``
-   one will override the ``.facet()`` one.
+   using both :py:meth:`elasticutils.S.facet()` and
+   :py:meth:`elasticutils.S.facet_raw()`, the facet_raw stuff will
+   override the facet stuff.
 
 
 .. seealso::
@@ -798,10 +1060,11 @@ That translates to::
      ElasticSearch docs on scripting
 
 
-Counts
-======
+Counts: ``count``
+=================
 
-Total hits can be found by using ``.count()``. For example::
+Total hits can be found by using :py:meth:`elasticutils.S.count()`.
+For example::
 
     q = S().query(title='taco trucks')
     count = q.count()
@@ -810,7 +1073,8 @@ Total hits can be found by using ``.count()``. For example::
 .. Note::
 
    Don't use Python's ``len`` built-in on the `S` instance if you want
-   the number of documents in your index that matches your search.
+   the total number of documents in your index that matches your
+   search.
 
    This::
 
@@ -829,122 +1093,8 @@ Total hits can be found by using ``.count()``. For example::
 
    performs the search, gets back as many documents as specified by
    the limits of your search, and returns the length of that list of
-   documents.
-
-
-.. _queries-mapping-type:
-
-Mapping types
-=============
-
-`MappingType` lets you specify the instance type for search results
-you get back from ElasticSearch searches. You can additionally relate
-a `MappingType` to a database model allowing you to link documents in
-the ElasticSearch index back to database objects in a lazy-loading
-way.
-
-Creating a `MappingType` lets you specify the index and doctype
-easily.  It also lets you tie business logic to your search results.
-
-For example, say you had a description field and wanted to have a
-truncated version of it::
-
-    class MyMappingType(MappingType):
-        def description_truncated(self):
-            return self.description[:100]
-
-    res = list(S(MyMappingType).query(description__text='stormy night'))[0]
-
-    print res.description_truncated()
-
-
-The most basic `MappingType` is the `DefaultMappingType` which is
-returned if you don't specify a `MappingType` and also don't specify
-``values_dict`` or ``values_list``. The `DefaultMappingType` lets you
-access search result fields as instance attributes or as keys::
-
-    res.description
-    res['description']
-
-The latter syntax is helpful when there are attributes defined on the
-class that have the same name as the document field.
-
-To create a `MappingType` you should probably override at least
-`get_index` and `get_mapping_type_name`. If you want to tie the
-`MappingType` to a database model, then you should define `get_model`
-which relates the `MappingType` to a database model class and
-`get_object` which returns the database object related to that search
-result. For example::
-
-    class ContactType(MappingType):
-        @classmethod
-        def get_index(cls):
-            return 'contacts_index'
-
-        @classmethod
-        def get_mapping_type_name(cls):
-            return 'contact_type'
-
-        @classmethod
-        def get_model(cls):
-            return ContactModel
-
-        def get_object(self):
-            return self.get_model().get(id=self._id)
-
-
-Results
-=======
-
-By default
-----------
-
-Results are lazy-loaded, so the query will not be made until you try
-to access an item or some other attribute requiring the data.
-
-If you have a typed `S` (e.g. ``S(MappingType)``), then by default,
-results will be instances of that type.
-
-If you have an untyped `S` (e.g. ``S()``), then by default, results
-will be `DefaultMappingType`.
-
-
-Results as a list of tuples
----------------------------
-
-`values_list` with no arguments returns a list of tuples of all the
-data for that document. With arguments, it'll return a list of tuples
-of values of the fields specified in the order the fields were
-specified.
-
-For example:
-
->>> list(S().values_list())
-[(1, 'fred', 40), (2, 'brian', 30), (3, 'james', 45)]
->>> list(S().values_list('id', 'name'))
-[(1, 'fred'), (2, 'brian'), (3, 'james')]
->>> list(S().values_list('name', 'id')
-[('fred', 1), ('brian', 2), ('james', 3)]
-
-.. Note::
-
-   If you don't specify fields, the data comes back in an arbitrary
-   order. It's probably best to specify fields or use ``values_dict``.
-
-
-Results as a list of dicts
---------------------------
-
-`values_dict` returns a list of dicts. With no arguments, it returns a
-list of dicts with all the fields. With arguments, it returns a list
-of dicts with specified fields.
-
-For example:
-
->>> list(S().values_dict())
-[{'id': 1, 'name': 'fred', 'age': 40}, {'id': 2, 'name': 'dennis', 'age': 37}]
->>> list(S().values_dict('id', 'name')
-[{'id': 1, 'name': 'fred'}, {'id': 2, 'name': 'brian'}]
+   documents which is **not** the total number of results in
+   ElasticSearch that match your search.
 
 
 .. _scores-and-explanations:
@@ -952,8 +1102,8 @@ For example:
 Scores and explanations
 =======================
 
-Seeing the score
-----------------
+Seeing the score: _score
+------------------------
 
 Wondering what the score for a document was? ElasticUtils puts that in
 the ``_score`` on the search result. For example, let's search an
@@ -968,13 +1118,13 @@ index that holds knowledge base articles for ones with the word
 This works regardless of what form the search results are in.
 
 
-Getting an explanation
-----------------------
+Getting an explanation: ``explain``
+-----------------------------------
 
 Wondering why one document shows up higher in the results than another
 that should have shown up higher? Wonder how that score was computed?
 You can set the search to pass the ``explain`` flag to ElasticSearch
-with the ``.explain()`` transform.
+with :py:meth:`elasticutils.S.explain()`.
 
 This returns data that will be in every item in the search results
 list as ``_explanation``.
@@ -1032,8 +1182,6 @@ The S class
 
        .. automethod:: elasticutils.S.es
 
-       .. automethod:: elasticutils.S.es_builder
-
        .. automethod:: elasticutils.S.indexes
 
        .. automethod:: elasticutils.S.doctypes
@@ -1050,8 +1198,35 @@ The S class
 
    **Methods that force evaluation**
 
+       .. automethod:: elasticutils.S.__iter__
+
+       .. automethod:: elasticutils.S.__len__
+
+       .. automethod:: elasticutils.S.all
+
        .. automethod:: elasticutils.S.count
+
+       .. automethod:: elasticutils.S.execute
 
        .. automethod:: elasticutils.S.facet_counts
 
 
+The F class
+-----------
+
+.. autoclass:: elasticutils.F
+   :members:
+
+
+The MappingType class
+---------------------
+
+.. autoclass:: elasticutils.MappingType
+   :members: from_results, get_object, get_indexes, get_mapping_type_name, get_model
+
+
+The SearchResults class
+-----------------------
+
+.. autoclass:: elasticutils.SearchResults
+   :members:

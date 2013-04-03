@@ -3,7 +3,6 @@ from unittest import TestCase
 
 from nose import SkipTest
 from nose.tools import eq_
-import pyes.exceptions
 
 from elasticutils.tests import ElasticTestCase, facet_counts_dict
 
@@ -21,70 +20,109 @@ SKIP_TESTS = False
 
 try:
     from django.conf import settings
+    from django.test import RequestFactory
+    from django.test.utils import override_settings
 
     from elasticutils.contrib.django import (
-        S, F, get_es, InvalidFieldActionError)
+        S, F, get_es, InvalidFieldActionError, ES_EXCEPTIONS,
+        ESExceptionMiddleware, es_required_or_50x)
+    from elasticutils.contrib.django.tasks import (
+        index_objects, unindex_objects)
     from elasticutils.tests.django_utils import (
-        FakeDjangoMappingType, FakeModel)
+        FakeDjangoMappingType, FakeModel, reset_model_cache)
 except ImportError:
     SKIP_TESTS = True
 
+    def override_settings(*args, **kw):
+        def wrapper(func):
+            return func
+        return wrapper
 
-def requires_django(fun):
+
+def require_django_or_skip(fun):
     @wraps(fun)
-    def _requires_django(*args, **kwargs):
+    def _require_django_or_skip(*args, **kwargs):
         if SKIP_TESTS:
             raise SkipTest
         return fun(*args, **kwargs)
-    return _requires_django
+    return _require_django_or_skip
 
 
-class STest(TestCase):
-    @requires_django
+class DjangoElasticTestCase(ElasticTestCase):
+    @classmethod
+    def setup_class(cls):
+        if cls.skip_tests or SKIP_TESTS:
+            return
+
+        super(DjangoElasticTestCase, cls).setup_class()
+
+    @classmethod
+    def teardown_class(cls):
+        if cls.skip_tests or SKIP_TESTS:
+            return
+
+        super(DjangoElasticTestCase, cls).setup_class()
+
+
+class TestS(TestCase):
+    @require_django_or_skip
     def test_require_mapping_type(self):
         """The Django S requires a mapping type."""
         self.assertRaises(TypeError, S)
 
+    @require_django_or_skip
+    def test_get_indexes(self):
+        """Test get_indexes always returns a list of strings."""
 
-class ESTest(TestCase):
-    @requires_django
-    def test_get_es_defaults(self):
-        """Test that the ES has the correct defaults."""
-        es = get_es()
-        eq_(es.timeout, settings.ES_TIMEOUT)
-        # dump_curl defaults to False, but if dump_curl is Falsey,
-        # then pyes.es.ES sets its dump_curl attribute to None.
-        eq_(es.dump_curl, None)
-        eq_(es.default_indexes, [settings.ES_INDEXES['default']])
+        # Pulls it from ES_INDEXES (list of strings).
+        s = S(FakeDjangoMappingType)
+        eq_(s.get_indexes(), ['elasticutilstest'])
 
-    @requires_django
-    def test_get_es_overriding_defaults(self):
-        """Test that overriding defaults works."""
-        class Dumper(object):
-            def write(self, val):
-                print val
+        # Pulls it from ES_INDEXES (string).
+        old_indexes = settings.ES_INDEXES
+        try:
+            settings.ES_INDEXES = {'default': 'elasticutilstest'}
 
-        d = Dumper()
+            s = S(FakeDjangoMappingType)
+            eq_(s.get_indexes(), ['elasticutilstest'])
+        finally:
+            settings.ES_INDEXES = old_indexes
 
-        es = get_es(timeout=20,
-                    dump_curl=d,
-                    default_indexes=['joe'])
+        # Pulls from indexes.
+        s = S(FakeDjangoMappingType).indexes('footest')
+        eq_(s.get_indexes(), ['footest'])
 
-        eq_(es.timeout, 20)
-        eq_(es.dump_curl, d)
-        eq_(es.default_indexes, ['joe'])
+        s = S(FakeDjangoMappingType).indexes('footest', 'footest2')
+        eq_(s.get_indexes(), ['footest', 'footest2'])
+
+        s = S(FakeDjangoMappingType).indexes('footest').indexes('footest2')
+        eq_(s.get_indexes(), ['footest2'])
+
+    @require_django_or_skip
+    def test_get_doctypes(self):
+        """Test get_doctypes always returns a list of strings."""
+        # Pulls from ._meta.db_table.
+        s = S(FakeDjangoMappingType)
+        eq_(s.get_doctypes(), ['fake'])
+
+        # Pulls from doctypes.
+        s = S(FakeDjangoMappingType).doctypes('footype')
+        eq_(s.get_doctypes(), ['footype'])
+
+        s = S(FakeDjangoMappingType).doctypes('footype', 'footype2')
+        eq_(s.get_doctypes(), ['footype', 'footype2'])
+
+        s = S(FakeDjangoMappingType).doctypes('footype').doctypes('footype2')
+        eq_(s.get_doctypes(), ['footype2'])
 
 
-class QueryTest(ElasticTestCase):
-    @classmethod
-    def get_es(cls):
-        return get_es()
-
+class QueryTest(DjangoElasticTestCase):
     @classmethod
     def setup_class(cls):
-        super(QueryTest, cls).setup_class()
         if cls.skip_tests or SKIP_TESTS:
             return
+
+        super(QueryTest, cls).setup_class()
 
         cls.create_index()
 
@@ -105,16 +143,16 @@ class QueryTest(ElasticTestCase):
 
         cls.refresh()
 
-    @requires_django
+    @require_django_or_skip
     def test_q(self):
         eq_(len(S(FakeDjangoMappingType).query(foo='bar')), 1)
         eq_(len(S(FakeDjangoMappingType).query(foo='car')), 2)
 
-    @requires_django
+    @require_django_or_skip
     def test_q_all(self):
         eq_(len(S(FakeDjangoMappingType)), 5)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter_empty_f(self):
         eq_(len(S(FakeDjangoMappingType).filter(F() | F(tag='awesome'))), 3)
         eq_(len(S(FakeDjangoMappingType).filter(F() & F(tag='awesome'))), 3)
@@ -122,22 +160,22 @@ class QueryTest(ElasticTestCase):
         eq_(len(S(FakeDjangoMappingType).filter(F() & F() & F(tag='awesome'))), 3)
         eq_(len(S(FakeDjangoMappingType).filter(F())), 5)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter(self):
         eq_(len(S(FakeDjangoMappingType).filter(tag='awesome')), 3)
         eq_(len(S(FakeDjangoMappingType).filter(F(tag='awesome'))), 3)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter_and(self):
         eq_(len(S(FakeDjangoMappingType).filter(tag='awesome', foo='bar')), 1)
         eq_(len(S(FakeDjangoMappingType).filter(tag='awesome').filter(foo='bar')), 1)
         eq_(len(S(FakeDjangoMappingType).filter(F(tag='awesome') & F(foo='bar'))), 1)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter_or(self):
         eq_(len(S(FakeDjangoMappingType).filter(F(tag='awesome') | F(tag='boat'))), 4)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter_or_3(self):
         eq_(len(S(FakeDjangoMappingType).filter(F(tag='awesome') | F(tag='boat') |
                                      F(tag='boring'))), 5)
@@ -146,29 +184,29 @@ class QueryTest(ElasticTestCase):
                                                   'width': '5'}
                                           })), 3)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter_complicated(self):
         eq_(len(S(FakeDjangoMappingType).filter(F(tag='awesome', foo='bar') |
                                      F(tag='boring'))), 2)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter_not(self):
         eq_(len(S(FakeDjangoMappingType).filter(~F(tag='awesome'))), 2)
         eq_(len(S(FakeDjangoMappingType).filter(~(F(tag='boring') | F(tag='boat')))), 3)
         eq_(len(S(FakeDjangoMappingType).filter(~F(tag='boat')).filter(~F(foo='bar'))), 3)
         eq_(len(S(FakeDjangoMappingType).filter(~F(tag='boat', foo='barf'))), 5)
 
-    @requires_django
+    @require_django_or_skip
     def test_filter_bad_field_action(self):
         with self.assertRaises(InvalidFieldActionError):
             len(S(FakeDjangoMappingType).filter(F(tag__faux='awesome')))
 
-    @requires_django
+    @require_django_or_skip
     def test_facet(self):
         qs = S(FakeDjangoMappingType).facet('tag')
         eq_(facet_counts_dict(qs, 'tag'), dict(awesome=3, boring=1, boat=1))
 
-    @requires_django
+    @require_django_or_skip
     def test_filtered_facet(self):
         qs = S(FakeDjangoMappingType).query(foo='car').filter(width=5)
 
@@ -180,7 +218,7 @@ class QueryTest(ElasticTestCase):
         eq_(facet_counts_dict(qs.facet('tag', filtered=True), 'tag'),
             {'awesome': 1})
 
-    @requires_django
+    @require_django_or_skip
     def test_global_facet(self):
         qs = S(FakeDjangoMappingType).query(foo='car').filter(width=5)
 
@@ -192,7 +230,7 @@ class QueryTest(ElasticTestCase):
         eq_(facet_counts_dict(qs.facet('tag', global_=True), 'tag'),
             dict(awesome=3, boring=1, boat=1))
 
-    @requires_django
+    @require_django_or_skip
     def test_facet_raw(self):
         qs = S(FakeDjangoMappingType).facet_raw(tags={'terms': {'field': 'tag'}})
         eq_(facet_counts_dict(qs, 'tags'),
@@ -204,7 +242,7 @@ class QueryTest(ElasticTestCase):
         eq_(facet_counts_dict(qs, 'tags'),
             {'awesome': 2})
 
-    @requires_django
+    @require_django_or_skip
     def test_facet_raw_overrides_facet(self):
         """facet_raw overrides facet with the same facet name."""
         qs = (S(FakeDjangoMappingType)
@@ -214,14 +252,174 @@ class QueryTest(ElasticTestCase):
         eq_(facet_counts_dict(qs, 'tag'),
             dict(awesome=3, boring=1, boat=1))
 
-    @requires_django
+    @require_django_or_skip
     def test_order_by(self):
         res = S(FakeDjangoMappingType).filter(tag='awesome').order_by('-width')
         eq_([d.id for d in res], [5, 3, 1])
 
-    @requires_django
-    def test_repr(self):
-        res = S(FakeDjangoMappingType)[:2]
-        list_ = list(res)
 
-        eq_(repr(list_), repr(res))
+class IndexableTest(DjangoElasticTestCase):
+    index_name = 'elasticutilstest'
+
+    @classmethod
+    def get_es(cls):
+        return get_es()
+
+    def setUp(self):
+        super(IndexableTest, self).setUp()
+        if self.skip_tests or SKIP_TESTS:
+            return
+        IndexableTest.create_index()
+
+    def tearDown(self):
+        super(IndexableTest, self).tearDown()
+        if self.skip_tests or SKIP_TESTS:
+            return
+        IndexableTest.cleanup_index()
+
+    @require_django_or_skip
+    def test_refresh(self):
+        FakeDjangoMappingType.refresh_index()
+
+    @require_django_or_skip
+    def test_index(self):
+        document = {'id': 1, 'name': 'odin skullcrusher'}
+
+        # Generate the FakeModel in our "database"
+        FakeModel(**document)
+
+        # Index the document with .index()
+        FakeDjangoMappingType.index(document, id_=document['id'])
+
+        IndexableTest.refresh()
+
+        # Query it to make sure it's there.
+        eq_(len(S(FakeDjangoMappingType).query(name__prefix='odin')), 1)
+
+    @require_django_or_skip
+    def test_bulk_index(self):
+        documents = [
+            {'id': 1, 'name': 'odin skullcrusher'},
+            {'id': 2, 'name': 'heimdall kneebiter'},
+            {'id': 3, 'name': 'erik rose'}
+            ]
+
+        # Generate the FakeModel in our "database"
+        for doc in documents:
+            FakeModel(**doc)
+
+        # Index the document with .index()
+        FakeDjangoMappingType.bulk_index(documents, id_field='id')
+
+        IndexableTest.refresh()
+
+        # Query it to make sure they're there.
+        eq_(len(S(FakeDjangoMappingType).query(name__prefix='odin')), 1)
+        eq_(len(S(FakeDjangoMappingType).query(name__prefix='erik')), 1)
+
+
+def require_celery_or_skip(fun):
+    @wraps(fun)
+    def _require_celery_or_skip(*args, **kwargs):
+        try:
+            import celery
+        except ImportError:
+            raise SkipTest
+        return fun(*args, **kwargs)
+    return _require_celery_or_skip
+
+
+class TestTasks(DjangoElasticTestCase):
+    index_name = 'elasticutilstest'
+
+    @classmethod
+    def get_es(cls):
+        return get_es()
+
+    def setUp(self):
+        super(TestTasks, self).setUp()
+        if self.skip_tests or SKIP_TESTS:
+            return
+        TestTasks.create_index()
+        reset_model_cache()
+
+    def tearDown(self):
+        super(TestTasks, self).tearDown()
+        if self.skip_tests or SKIP_TESTS:
+            return
+        TestTasks.cleanup_index()
+
+    @require_celery_or_skip
+    def test_tasks(self):
+        documents = [
+            {'id': 1, 'name': 'odin skullcrusher'},
+            {'id': 2, 'name': 'heimdall kneebiter'},
+            {'id': 3, 'name': 'erik rose'}
+            ]
+
+        for doc in documents:
+            FakeModel(**doc)
+
+        # Test index_objects task
+        index_objects(FakeDjangoMappingType, [1, 2, 3])
+        FakeDjangoMappingType.refresh_index()
+        eq_(FakeDjangoMappingType.search().count(), 3)
+
+        # Test unindex_objects task
+        unindex_objects(FakeDjangoMappingType, [1, 2, 3])
+        FakeDjangoMappingType.refresh_index()
+        eq_(FakeDjangoMappingType.search().count(), 0)
+
+
+class MiddlewareTest(DjangoElasticTestCase):
+
+    def setUp(self):
+        super(MiddlewareTest, self).setUp()
+        if self.skip_tests or SKIP_TESTS:
+            return
+
+        def view(request, exc):
+            raise exc
+
+        self.func = view
+        self.fake_request = RequestFactory().get('/')
+
+    @require_django_or_skip
+    def test_exceptions(self):
+        for exc in ES_EXCEPTIONS:
+            response = ESExceptionMiddleware().process_exception(
+                self.fake_request, exc(Exception))
+            eq_(response.status_code, 503)
+
+    @require_django_or_skip
+    @override_settings(ES_DISABLED=True)
+    def test_es_disabled(self):
+        response = ESExceptionMiddleware().process_request(self.fake_request)
+        eq_(response.status_code, 501)
+
+
+class DecoratorTest(DjangoElasticTestCase):
+
+    def setUp(self):
+        super(DecoratorTest, self).setUp()
+        if self.skip_tests or SKIP_TESTS:
+            return
+
+        @es_required_or_50x()
+        def view(request, exc):
+            raise exc
+
+        self.func = view
+        self.fake_request = RequestFactory().get('/')
+
+    @require_django_or_skip
+    def test_exceptions(self):
+        for exc in ES_EXCEPTIONS:
+            response = self.func(self.fake_request, exc(Exception))
+            eq_(response.status_code, 503)
+
+    @require_django_or_skip
+    @override_settings(ES_DISABLED=True)
+    def test_es_disabled(self):
+        response = self.func(self.fake_request)
+        eq_(response.status_code, 501)

@@ -2,12 +2,207 @@
 What's new in ElasticUtils
 ==========================
 
-Version 0.6: in development
+.. contents::
+   :local:
+
+
+Version 0.7: in development
 ===========================
+
+.. Note::
+
+   This is a *big* change. We switched from pyes to pyelasticsearch. In
+   doing that, we changed a handful of signatures, nixed some
+   functionality that didn't make any sense any more, and cleaned a
+   bunch of things up.
+
+   If this terrifies you, read through these notes carefully and/or
+   stay with v0.6.
 
 **API-breaking changes:**
 
-* **values_dict no longer always includes id.**
+* **pyelasticsearch v0.3 or later now required.**
+
+  ElasticUtils now requires pyelasticsearch v0.3 or later and its
+  requirements.
+
+* **elasticutils.PYES_VERSION is removed.**
+
+  Since we're not using pyes, we removed `elasticutils.PYES_VERSION`.
+
+* **ElasticUtils no longer supports thrift.**
+
+  Pretty sure we did a lousy job of supporting it before---it was all
+  in the pyes code and we had no tests for it.
+
+* **get_es() signatures have changed.**
+
+  * takes urls now instead of hosts
+  * dump_curl argument is now gone
+  * default_indexes argument is gone
+
+  The arguments correspond with pyelasticsearch `ElasticSearch`
+  object.
+
+  ElasticUtils uses HTTP urls for connecting to ElasticSearch now.
+  Previously, you'd do::
+
+      get_es(hosts=['localhost:9200'])        # Old way
+
+  Now you do::
+
+      get_es(urls=['http://localhost:9200'])  # New way
+
+  The dump_curl argument was helpful for debugging, but we don't
+  really need it anymore. See the :ref:`debugging-chapter` for better
+  debugging methods.
+
+  Will now raise a `DeprecationWarning` if you pass in `hosts`
+  argument.
+
+* **S searches all indexes and doctypes by default.**
+
+  Previously, if you did::
+
+      S()
+
+  it'd search an index named "default" for doctypes "document". That
+  was dumb. Now it searches all indexes and all doctypes by default.
+
+* **S.es_builder is gone.**
+
+  ``es_builder()`` was there to get around problems with pyes' ES
+  class. The pyelasticsearch `ElasticSearch` class is more
+  straightforward, so we don't need to do circus shenanigans.
+
+  You can probably do what you need to with either the ``es()``
+  transform or by subclassing `S` and overriding the ``get_es()``
+  method.
+
+* **MLT arguments changed.**
+
+  The `fields` argument in the constructor was renamed to `mlt_fields`
+  to be in line with ElasticSearch API names.
+
+  Will now raise a `DeprecationWarning` if you pass in `fields`
+  argument.
+
+* **Django: changed settings.**
+
+  Changed ES_HOSTS setting to ES_URLS. This is both a name and a value
+  change. ES_URLS takes a list of strings each is an http url. You'll
+  neex to update your settings files from::
+
+      ES_HOSTS = ['localhost:9200']        # Old way
+
+  to::
+
+      ES_URLS = ['http://localhost:9200']  # New way
+
+  ES_DUMP_CURL is gone.
+
+* **Django: removed the statsd code.**
+
+* **Django: ESTestCase was renamed to ElasticTestCase.**
+
+* **Django: Indexable.index() method no longer has bulk argument.**
+
+  The `Indexable.index()` method no longer does bulk indexing. The
+  way pyes did this was kind of squirrely and caused issues if you
+  didn't have the order of operations correct.
+
+  Now `Indexable.index()` only indexes a single document.
+
+  But wait...
+
+* **Django: Indexable now has bulk_index() .**
+
+  pyes would keep track of all the things you wanted to bulk index
+  and then at some point push them all. Instead of doing it under the
+  hood, we added a separate `bulk_index()` method and now you control
+  how many items get indexed in bulk in one pass.
+
+* **Django: Indexable.refresh_index no longer takes a timeout argument.**
+
+  pyelasticsearch `ElasticSearch.refresh` doesn't take a timesleep
+  argument, so we don't need that anymore.
+
+* **Django: Indexable `es` argument defaults to Indexable.get_es() now.**
+
+  Previously it defaulted to `elasticsearch.contrib.django.get_es()`. Now
+  it defaults to `Indexable.get_es()` class method making it more flexible.
+
+* **pyes -> pyelasticsearch changes.**
+
+  If you called ``.get_es()`` and got a pyes `ES` object and did
+  things with that (create index, create mappings, delete indexes,
+  indexing, cluster health, ...), you're going to need to make
+  some changes.
+
+  You can either:
+
+  1. rewrite that code to use pyelasticsearch `ElasticSearch`
+     equivalents, or
+
+  2. write and use your own ``get_es()`` function that returns
+     a pyes `ES` object
+
+  Rewriting shouldn't be too hard. The `pyelasticsearch documentation
+  <https://pyelasticsearch.readthedocs.org/en/latest/>`_ is pretty good
+  and for most things, there's a 1-to-1 translation.
+
+**Changes:**
+
+* **pyes is no longer a requirement.**
+
+  We no longer use pyes so you can remove it from your requirements.
+
+* **Django: es_required_or_50x handles different exceptions.**
+
+  Previously it handled:
+
+  * pyes.urllib3.MaxRetryError
+  * pyes.exceptions.IndexMissingException
+  * pyes.exceptions.ElasticSearchException
+
+  We're not using pyes anymore, so now it handles:
+
+  * pyelasticsearch.exceptions.ConnectionError
+  * pyelasticsearch.exceptions.ElasticHttpNotFoundError
+  * pyelasticsearch.exceptions.Timeout
+
+  You probably don't need to do anything about this, but it's good to
+  know.
+
+* **Django: celery tasks rewritten.**
+
+  The celery tasks were rewritten, docs were updated, and tests were
+  added so they work now.
+
+* **elasticutils.PYELASTICSEARCH_VERSION is added.**
+
+  You can see which version of pyelasticsearch is in use by doing::
+
+      from elasticutils import PYELASTICSEARCH_VERSION
+      print PYELASTICSEARCH_VERSION
+
+* **S.execute added**
+
+  This allows you to explicitly execute a search and get back a
+  `SearchResults` instance.
+
+* **S.all added**
+
+  Allows you to get **all** the search results possible. This is
+  dangerous, so it's been documented with lots of warnings.
+
+
+Version 0.6: Released January 17th, 2013
+========================================
+
+**API-breaking changes:**
+
+* **S.values_dict no longer always includes id.**
 
   ``values_dict`` no longer always includes an 'id' field in the
   fields list if you don't specify it.
@@ -20,7 +215,7 @@ Version 0.6: in development
 
       S().values_dict('name', 'number')
 
-* **values_list no longer always includes id.**
+* **S.values_list no longer always includes id.**
 
   ``values_list`` no longer always includes an 'id' field in the
   fields list if you don't specify it.
@@ -38,10 +233,10 @@ Version 0.6: in development
 
   This is a big change.
 
-  In ElasticUtils v0.4, `S` could take a type and that type was a
-  model. This is now completely different.
+  Up through ElasticUtils v0.5, `S` could take a type and that type was
+  a model. This is now completely different.
 
-  In ElasticUtils v0.5 and later, `S` takes a `MappingType`. A
+  In ElasticUtils v0.6 and later, `S` takes a `MappingType`. A
   `MappingType` can be related to a model, but it itself should not be
   a model. This allows us to return search results as a list of
   `MappingType` instances which can do things rather than forcing you
@@ -55,9 +250,9 @@ Version 0.6: in development
 
 * **By default, results are now DefaultMappingType.**
 
-  In ElasticUtils v0.4, if the `S` was untyped and you didn't specify
-  either ``values_dict`` or ``values_list``, then the results would
-  come back as a list of dicts.
+  In ElasticUtils v0.4 and v0.5, if the `S` was untyped and you didn't
+  specify either ``values_dict`` or ``values_list``, then the results
+  would come back as a list of dicts.
 
   In ElasticUtils v0.5, if the `S` is untyped and you didn't specify
   either ``values_dict`` or ``values_list``, then the results would
@@ -79,9 +274,19 @@ Version 0.6: in development
 
   See documentation for more details.
 
+* Fixed ``elasticutils.contrib.django.es_required_or_50x``.
 
-Version 0.5: in development
-===========================
+  It works better now.
+
+* prefix filter support.
+
+  ElasticUtils supports prefix filters. You can do this now::
+
+      S().filter(name__prefix='odin')
+
+
+Version 0.5: Released September 4th, 2012
+=========================================
 
 **API-breaking changes:**
 

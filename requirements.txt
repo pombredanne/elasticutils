@@ -1,2 +1,1 @@
-# pyes 0.15 or 0.16--0.17 has API breaking things
-pyes>=0.15,<0.17
+pyelasticsearch >= 0.3

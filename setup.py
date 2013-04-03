@@ -27,7 +27,7 @@ setup(
     author='Mozilla Foundation and contributors',
     license='BSD',
     packages=find_packages(),
-    install_requires=['pyes>=0.15,<0.17'],
+    install_requires=['pyelasticsearch>=0.3'],
     include_package_data=True,
     classifiers=[
         'Development Status :: 4 - Beta',

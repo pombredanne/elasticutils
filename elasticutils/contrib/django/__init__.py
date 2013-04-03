@@ -1,138 +1,156 @@
 import logging
 from functools import wraps
-from threading import local
 
-from pyes import exceptions
-from pyes.es import thrift_enable
+import pyelasticsearch
 
 import elasticutils
 from elasticutils import F, InvalidFieldActionError
 
 try:
     from django.conf import settings
+    from django.shortcuts import render
+    from django.utils.decorators import decorator_from_middleware_with_args
 except ImportError:
-    pass
-
-try:
-    from statsd import statsd
-except ImportError:
-    statsd = None
+    def decorator_from_middleware_with_args(func):
+        return func
 
 
 log = logging.getLogger('elasticutils')
 
 
-_local = local()
-_local.disabled = {}
+ES_EXCEPTIONS = (
+    pyelasticsearch.exceptions.ConnectionError,
+    pyelasticsearch.exceptions.ElasticHttpError,
+    pyelasticsearch.exceptions.ElasticHttpNotFoundError,
+    pyelasticsearch.exceptions.Timeout
+)
 
 
 def get_es(**overrides):
-    """Return an ES object using settings from settings.py
+    """Return a pyelasticsearch ElasticSearch object using settings
+    from ``settings.py``.
 
-    :arg overrides: Allows you to override defaults to create the ES.
+    :arg overrides: Allows you to override defaults to create the
+    ElasticSearch object.
 
-    Things you can override:
+    You can override any of the arguments listed in :ref:`get_es`.
 
-    * default_indexes
-    * timeout
-    * dump_curl
-
-    Values for these correspond with the arguments to pyes.es.ES.
-
-    For example, if you wanted to create an ES for indexing with a timeout
-    of 30 seconds, you'd do:
+    For example, if you wanted to create an ElasticSearch with a
+    longer timeout to a different cluster, you'd do:
 
     >>> from elasticutils.contrib.django import get_es
-    >>> es = get_es(timeout=30)
+    >>> es = get_es(urls=['http://some_other_cluster:9200'], timeout=30)
 
-    If you wanted to create an ES for debugging that dumps curl
-    commands to stdout, you could do:
-
-    >>> class CurlDumper(object):
-    ...     def write(self, s):
-    ...         print s
-    ...
-    >>> from elasticutils.contrib.django import get_es
-    >>> es = get_es(dump_curl=CurlDumper())
     """
-    if overrides or not hasattr(_local, 'es'):
-        defaults = {
-            'default_indexes': [settings.ES_INDEXES['default']],
-            'timeout': getattr(settings, 'ES_TIMEOUT', 5),
-            'dump_curl': getattr(settings, 'ES_DUMP_CURL', False)
-            }
+    defaults = {
+        'urls': settings.ES_URLS,
+        'timeout': getattr(settings, 'ES_TIMEOUT', 5)
+        }
 
-        defaults.update(overrides)
-        if (not thrift_enable and
-            not settings.ES_HOSTS[0].split(':')[1].startswith('92')):
-            raise ValueError('ES_HOSTS is not set to a valid port starting '
-                             'with 9200-9299 range. Other ports are valid '
-                             'if using pythrift.')
-        es = elasticutils.get_es(settings.ES_HOSTS, **defaults)
-
-        # Cache the es if there weren't any overrides.
-        if not overrides:
-            _local.es = es
-    else:
-        es = _local.es
-
-    return es
+    defaults.update(overrides)
+    return elasticutils.get_es(**defaults)
 
 
-def es_required(f):
-    @wraps(f)
+def es_required(fun):
+    """Wrap a callable and return None if ES_DISABLED is False.
+
+    This also adds an additional `es` argument to the callable
+    giving you an ElasticSearch to use.
+
+    """
+    @wraps(fun)
     def wrapper(*args, **kw):
-        if settings.ES_DISABLED:
-            # Log once.
-            if f.__name__ not in _local.disabled:
-                log.debug('Search disabled for %s.' % f)
-                _local.disabled[f.__name__] = 1
+        if getattr(settings, 'ES_DISABLED', False):
+            log.debug('Search disabled for %s.' % fun)
             return
 
-        return f(*args, es=get_es(), **kw)
+        return fun(*args, es=get_es(), **kw)
     return wrapper
 
 
-def es_required_or_50x(disabled_msg, error_msg):
+class ESExceptionMiddleware(object):
+    """Middleware to handle ElasticSearch errors.
+
+    HTTP 501
+      Returned when ``ES_DISABLED`` is True.
+
+    HTTP 503
+      Returned when any of the following exceptions are thrown:
+
+      * pyelasticsearch.exceptions.ConnectionError
+      * pyelasticsearch.exceptions.ElasticHttpError
+      * pyelasticsearch.exceptions.ElasticHttpNotFoundError
+      * pyelasticsearch.exceptions.Timeout
+
+      Template variables:
+
+      * error: A string version of the exception thrown.
+
+    :arg disabled_template: The template to use when ES_DISABLED is True.
+
+        Defaults to ``elasticutils/501.html``.
+
+    :arg error_template: The template to use when ElasticSearch isn't
+        working properly, is missing an index, or something along
+        those lines.
+
+        Defaults to ``elasticutils/503.html``.
+
     """
-    This takes a Django view that requires ElasticSearch.
 
-    If `ES_DISABLED` is `True` then we raise a 501 Not Implemented and display
-    the disabled_msg.  If we try the view and an ElasticSearch exception is
-    raised we raise a 503 error with the error_msg.
+    def __init__(self, disabled_template=None, error_template=None):
+        self.disabled_template = (
+            disabled_template or 'elasticutils/501.html')
+        self.error_template = (
+            error_template or 'elasticutils/503.html')
 
-    We use user-supplied templates in elasticutils/501.html and
-    elasticutils/503.html.
-    """
-    def wrap(f):
-        @wraps(f)
-        def wrapper(request, *args, **kw):
-            from django.shortcuts import render
-            if settings.ES_DISABLED:
-                response = render(request, 'elasticutils/501.html',
-                                  {'msg': disabled_msg})
-                response.status_code = 501
-                return response
-            else:
-                try:
-                    return f(request, *args, **kw)
-                except exceptions.ElasticSearchException as error:
-                    response = render(request, 'elasticutils/503.html',
-                            {'msg': error_msg, 'error': error})
-                    response.status_code = 503
-                    return response
+    def process_request(self, request):
+        if getattr(settings, 'ES_DISABLED', False):
+            response = render(request, self.disabled_template)
+            response.status_code = 501
+            return response
 
-        return wrapper
+    def process_exception(self, request, exception):
+        if issubclass(exception.__class__, ES_EXCEPTIONS):
+            response = render(request, self.error_template,
+                              {'error': exception})
+            response.status_code = 503
+            return response
 
-    return wrap
+
+"""
+The following decorator wraps a Django view and handles ElasticSearch errors.
+
+This wraps a Django view and returns 501 or 503 status codes and
+pages if things go awry.
+
+See the above middleware for explanation of the arguments.
+
+Examples::
+
+    # This creates a home_view and decorates it to use the
+    # default templates.
+
+    @es_required_or_50x()
+    def home_view(request):
+        ...
+
+
+    # This creates a search_view and overrides the templates
+
+    @es_required_or_50x(disabled_template='search/es_disabled.html',
+                        error_template('search/es_down.html')
+    def search_view(request):
+        ...
+
+"""
+es_required_or_50x = decorator_from_middleware_with_args(ESExceptionMiddleware)
 
 
 class S(elasticutils.S):
     """S that's more Django-focused
 
-    * uses an ES that's based on settings
-    * if statsd is installed, calls statsd.timing with how long
-      it took to do the query
+    * creates ElasticSearch objects based on ``settings.py`` settings
 
     """
     def __init__(self, mapping_type):
@@ -149,22 +167,27 @@ class S(elasticutils.S):
         """
         return super(S, self).__init__(mapping_type)
 
-    def raw(self):
-        hits = super(S, self).raw()
-        if statsd:
-            statsd.timing('search', hits['took'])
-        return hits
+    def get_es(self, default_builder=get_es):
+        """Returns the pyelasticsearch ElasticSearch object to use.
 
-    def get_es(self, default_builder=None):
-        # Override the default_builder with the Django one
-        return super(S, self).get_es(default_builder=get_es)
+        This uses the django get_es builder by default which takes
+        into account settings in ``settings.py``.
+
+        """
+        return super(S, self).get_es(default_builder=default_builder)
 
     def get_indexes(self, default_indexes=None):
+        """Returns the list of indexes to act on."""
         doctype = self.type.get_mapping_type_name()
         indexes = (settings.ES_INDEXES.get(doctype) or
                    settings.ES_INDEXES['default'])
+        if isinstance(indexes, basestring):
+            indexes = [indexes]
         return super(S, self).get_indexes(default_indexes=indexes)
 
     def get_doctypes(self, default_doctypes=None):
-        doctype = self.type.get_mapping_type_name()
-        return super(S, self).get_doctypes(default_doctypes=doctype)
+        """Returns the doctypes (or mapping type names) to use."""
+        doctypes = self.type.get_mapping_type_name()
+        if isinstance(doctypes, basestring):
+            doctypes = [doctypes]
+        return super(S, self).get_doctypes(default_doctypes=doctypes)

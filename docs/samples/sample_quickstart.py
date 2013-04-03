@@ -38,14 +38,15 @@ mapping = {
     DOCTYPE: {
         'properties': {
             'id': {'type': 'integer'},
-            'title': {'type': 'string'},
+            'title': {'type': 'string', 'analyzer': 'snowball'},
             'topics': {'type': 'string'},
             'product': {'type': 'string', 'index': 'not_analyzed'},
             }
         }
     }
  
-# This uses pyelasticsearch ElasticSearch.create_index.
+# This uses pyelasticsearch ElasticSearch.create_index to create the
+# index with the specified mapping for 'testdoc'.
 es.create_index(INDEX, settings={'mappings': mapping})
 
 
@@ -81,74 +82,50 @@ es.bulk_index(INDEX, DOCTYPE, documents, id_field='id')
 # the index.
 es.refresh(INDEX)
 
+# Ok. We've created an index and tossed some stuff in it. Let's
+# do some basic queries.
+
 # Let's build a basic S that looks at the right instance of
 # ElasticSearch, index, and doctype.
-basic_s = S().es(urls=[URL]).indexes(INDEX).doctypes(DOCTYPE).values_dict()
- 
-# Now let's see facet counts for all the products.
-s = basic_s.facet('product')
+basic_s = S().es(urls=[URL]).indexes(INDEX).doctypes(DOCTYPE)
 
-print s.facet_counts()
-# Pretty-printed output:
-# {u'product': [
-#    {u'count': 5, u'term': u'Firefox'},
-#    {u'count': 3, u'term': u'Firefox for mobile'},
-#    {u'count': 1, u'term': u'Boot2Gecko'}
-#    ]}
+# How many documents are in our index?
+print basic_s.count()
+# Prints:
+# 5
 
-# Let's do a query for 'cookie' and do a facet count.
-print s.query(title__text='cookie').facet_counts()
-# Pretty-printed output:
-# {u'product': [
-#    {u'count': 1, u'term': u'Firefox for mobile'},
-#    {u'count': 1, u'term': u'Firefox'}
-#    ]}
+# Let's get all the cookie articles.
+print [item['title']
+       for item in basic_s.query(title__text='cookie')]
+# Prints:
+# [u'Deleting cookies', u'What is a cookie?',
+# u'Websites say cookies are blocked - Unblock them']
 
-# Note that the facet_counts are affected by the query.
+# Let's see cookie articles for websites.
+print [item['title']
+       for item in basic_s.query(title__text='cookie')
+                          .filter(topics='websites')]
+# Prints:
+# [u'Websites say cookies are blocked - Unblock them']
 
-# Let's do a filter for 'flash' in the topic.
-print s.filter(topics='flash').facet_counts()
-# Pretty-printed output:
-# {u'product': [
-#    {u'count': 5, u'term': u'Firefox'},
-#    {u'count': 3, u'term': u'Firefox for mobile'},
-#    {u'count': 1, u'term': u'Boot2Gecko'}
-#    ]}
+# Let's see all articles in the 'basic' topic.
+print [item['title']
+       for item in basic_s.filter(topics='basic')]
+# Prints:
+# [u'Awesome Bar', u'What is a cookie?']
 
-# Note that the facet_counts are NOT affected by filters.
+# Let's do a query and use the highlighter to denote the matching
+# text.
+print [(item['title'], item._highlight['title'])
+       for item in basic_s.query(title__text='cookie').highlight('title')]
+# Prints:
+# [
+#    (u'Deleting cookies', [u'Deleting <em>cookies</em>']),
+#    (u'What is a cookie?', [u'What is a <em>cookie</em>?']),
+#    (u'Websites say cookies are blocked - Unblock them',
+#       [u'Websites say <em>cookies</em> are blocked - Unblock them']
+#    )
+# ]
 
-# Let's do a filter for 'flash' in the topic, and specify
-# filtered=True.
-print s.facet('product', filtered=True).filter(topics='flash').facet_counts()
-# Pretty-printed output:
-# {u'product': [
-#    {u'count': 1, u'term': u'Firefox'}
-#    ]}
 
-# Using filtered=True causes the facet_counts to be affected by the
-# filters.
-
-# We've done a bunch of faceting on a field that is not
-# analyzed. Let's look at what happens when we try to use facets on a
-# field that is analyzed.
-print basic_s.facet('topics').facet_counts()
-# Pretty-printed output:
-# {u'topics': [
-#    {u'count': 3, u'term': u'privacy'},
-#    {u'count': 3, u'term': u'cookies'},
-#    {u'count': 2, u'term': u'basic'},
-#    {u'count': 1, u'term': u'websites'},
-#    {u'count': 1, u'term': u'user'},
-#    {u'count': 1, u'term': u'tips'},
-#    {u'count': 1, u'term': u'search'},
-#    {u'count': 1, u'term': u'interface'},
-#    {u'count': 1, u'term': u'flash'}
-#    ]}
-
-# Note how the facet counts shows 'user' and 'interface' as two
-# separate terms even though they're a single topic for document with
-# id=4. When that document is indexed, the topic field is analyzed and
-# the default analyzer tokenizes it splitting it into two terms.
-#
-# Moral of the story is that you want fields you facet on to be
-# analyzed as keyword fields or not analyzed at all.
+# That's the gist of it!
